@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Commission Statement Reader</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark"></span>
+      <h1>Statement Reader</h1>
+    </div>
+    <div class="topbar-actions">
+      <button id="export-all" class="btn ghost" hidden>Export all</button>
+      <button id="theme" class="btn icon" title="Toggle theme" aria-label="Toggle theme">◐</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <label for="file" id="drop" class="drop" tabindex="0">
+        <span class="drop-icon">↥</span>
+        <strong>Drop a PDF</strong>
+        <span class="muted">or click to browse</span>
+        <input id="file" type="file" accept="application/pdf" multiple hidden />
+      </label>
+      <div id="list" class="list"></div>
+    </aside>
+
+    <section class="content">
+      <div id="empty" class="empty">
+        <h2>No statement loaded</h2>
+        <p class="muted">Upload a commission statement PDF to extract its table.</p>
+      </div>
+
+      <div id="viewer" hidden>
+        <div class="content-head">
+          <div>
+            <h2 id="title"></h2>
+            <div id="badges" class="badges"></div>
+          </div>
+          <div class="actions">
+            <button id="copy-tsv" class="btn">Copy table</button>
+            <button id="download" class="btn ghost">Download TSV</button>
+            <button id="toggle-pdf" class="btn ghost">Show PDF</button>
+          </div>
+        </div>
+
+        <div id="warnings" class="warnings" hidden></div>
+
+        <div class="panes" id="panes">
+          <div class="pane table-pane">
+            <div class="table-wrap">
+              <table id="table"></table>
+            </div>
+            <p class="hint muted">
+              Click any cell to copy it. Click a column header to copy the whole column.
+            </p>
+          </div>
+          <div class="pane pdf-pane" id="pdf-pane" hidden>
+            <iframe id="pdf" title="Source PDF"></iframe>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
