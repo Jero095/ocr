@@ -1,7 +1,11 @@
 # Commission statements contain customer names, policy numbers and amounts.
 # Keep real statements and anything extracted from them out of git history.
 statements/
+*.csv
 *.tsv
+*.xls
+*.xlsx
+~$*
 
 __pycache__/
 *.py[cod]
