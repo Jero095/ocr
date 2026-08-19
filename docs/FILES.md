@@ -17,12 +17,15 @@ app/
   extract.py     971 lines    PDF geometry engine, templates, failsafe, Statement
   ocr.py         226 lines    OCR for image-only scans -> word boxes in points
   tabular.py     383 lines    CSV/TSV loading and cleaning
+  store.py       533 lines    SQLite: statements, users, sessions
+  auth.py         96 lines    the gate: middleware, session cookies
   excel.py       247 lines    .xlsx workbook construction
-  main.py        205 lines    FastAPI routes, in-memory store, export guard
+  main.py        350 lines    FastAPI routes, upload, export guard
   static/
-    app.js       426 lines    all frontend behaviour
-    style.css    485 lines    design tokens, dark/light, layout
-    index.html    77 lines    page skeleton
+    app.js       462 lines    all frontend behaviour
+    style.css    557 lines    design tokens, dark/light, layout
+    index.html    79 lines    page skeleton
+    login.html    73 lines    sign-in page
 scripts/
   carriers_report.py  194     sweeps statements/, regenerates CARRIERS.md
   failsafe_report.py   37     per-file payout reconciliation table
@@ -123,6 +126,32 @@ Produces the same `Statement`, so everything downstream is unchanged.
 
 ---
 
+## `app/store.py` — persistence
+
+SQLite via stdlib `sqlite3`, no ORM: `Statement.to_dict()` is already JSON, so a
+statement is one payload blob plus indexed columns for listing.
+
+- `connect()` — sets WAL (a long history read must not block an upload) and
+  `foreign_keys=ON`.
+- `hash_password` / `verify_user` — stdlib `hashlib.scrypt`. A missing account
+  still pays the hash cost, so timing cannot enumerate who has an account.
+- `create_session` / `session_user` / `delete_session` — server-side sessions, so
+  logout and disabling a user take effect immediately.
+- `lock_remaining` / `_record_failure` — per-email lockout. Per-email rather than
+  per-IP because everyone arrives over the same Tailscale connection.
+- `save_statement` / `get_statement` / `list_statements` — the payload is the
+  source of truth; the scalar columns are denormalised copies for filtering.
+- `recent_ids()` — the default export scope.
+- `duplicate_of()` — same file uploaded twice, by content hash. Surfaced, not
+  blocked; history is shared so a second upload may be deliberate.
+
+## `app/auth.py` — the gate
+
+One middleware, not per-route dependencies — see the CLAUDE.md rationale.
+`PUBLIC_PATHS` is the complete anonymous surface. `set_session_cookie()` derives
+`Secure` from the request scheme so HTTPS is enforced over Tailscale without
+breaking `http://localhost`.
+
 ## `app/excel.py` — workbook construction
 
 - `build_workbook()` — assembles `All Rows` (cross-carrier), one sheet per
@@ -143,7 +172,9 @@ Imports its canonical mapping from `extract.py`; does not define its own.
 
 - Upload routing: `.pdf` → `parse_pdf`, `.csv/.tsv/.txt` → `parse_delimited`,
   anything else → 400.
-- `STATEMENTS` — the in-memory store. Swap point for SQLite.
+- Persistence goes through `store`; `main.py` holds no state of its own.
+- `_export_set()` — resolves `?ids=`, defaulting to the caller's last 24 hours.
+  Without it, persistence silently turns "export all" into "the entire history".
 - `_guard_failsafe()` — raises **409** on any export whose failsafe failed. The
   UI disables the buttons, but the endpoints are directly reachable, so this is
   the real enforcement.
@@ -195,6 +226,8 @@ Together these are the regression suite — there is no `pytest`.
 | Change date/amount cleaning | `tabular.py` → `_plan_column`, `_clean_value` |
 | Drop another junk row | `tabular.py` → `DROP_ROW_MARKERS` |
 | Change Excel typing/formats | `excel.py` → `_write` |
-| Add an endpoint | `main.py` |
+| Add an endpoint | `main.py` (remember it is behind the gate) |
+| Change what anonymous callers may fetch | `auth.py` → `PUBLIC_PATHS` |
+| Add a stored field | `store.py` → `SCHEMA` + `save_statement` |
 | Change the UI | `static/app.js` + `static/style.css` |
 | Add a new source type | produce a `Statement`; call `_finalise()` |

@@ -198,7 +198,30 @@ Clipboard API is unavailable (non-secure context).
 
 ---
 
-## 6. Interface
+## 6. Accounts and history
+
+### Sign-in
+- Email and password, hashed with stdlib `scrypt`. Sessions are server-side rows,
+  so signing out revokes immediately and survives a restart.
+- **Nothing is readable without signing in** — not the API, and not the UI itself.
+- Per-email lockout after 8 failed attempts for 15 minutes.
+- No self-service signup; accounts come from `scripts/adduser.py`.
+
+### History
+- Statements **persist across restarts** in SQLite, with the original file kept
+  so the side-by-side PDF view still works months later.
+- Shared across the team and **attributed** — each entry records who uploaded it
+  and when.
+- Searchable by filename or carrier, filterable by failsafe status and uploader.
+- Duplicate uploads are detected by file hash and surfaced, not silently stored
+  twice.
+- Uploads are capped at 40MB.
+
+### Export scoping
+"Export all" means the statements you are working on, not the entire history.
+Exports take explicit ids; with none given it falls back to your last 24 hours.
+
+## 7. Interface
 
 - Drag-and-drop or browse; multiple files at once.
 - Sidebar listing every loaded statement with a green/red status dot and row count.
@@ -214,7 +237,7 @@ Clipboard API is unavailable (non-secure context).
 
 ---
 
-## 7. Reporting
+## 8. Reporting
 
 - **`CARRIERS.md`** — generated registry of every carrier with status, failsafe
   verdict, exported vs declared amounts, row counts and how it was parsed.
@@ -232,6 +255,5 @@ Clipboard API is unavailable (non-secure context).
 - **`ISC 58.65.pdf`** reports 0 pages and cannot be opened at all — a corrupt
   file that needs re-exporting from the carrier.
 
-- **Persistence.** Statements live in memory; a restart clears them.
-- **Authentication.** There is none — do not expose the app publicly as-is.
+- **Password reset by email.** An admin resets with `scripts/adduser.py passwd`.
 - **LLM fallback** for layouts the auto-detector cannot crack.

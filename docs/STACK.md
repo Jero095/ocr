@@ -18,7 +18,7 @@ contested and the alternatives are still reasonable.
 | Excel writer | openpyxl | 3.1.5 |
 | OCR (scans) | pytesseract + Tesseract 5.4 | 0.3.13 |
 | Frontend | Plain HTML / CSS / JS | — |
-| Storage | In-process dict | — |
+| Storage | SQLite (stdlib `sqlite3`), WAL | — |
 
 ```bash
 pip install -r requirements.txt
@@ -88,10 +88,20 @@ looks right. `openpyxl` also does frozen panes, autofilter, and per-cell fonts
 and borders. `xlsxwriter` writes only; `openpyxl` reads too, which the
 verification scripts use to assert what was actually written.
 
-### In-memory storage, not SQLite
-Deliberate for now: no schema, no migrations, no file locking. `STATEMENTS` is a
-single dict in `app/main.py` and swapping it for SQLite is a contained change
-behind the same REST surface. The cost is real — a restart clears the list.
+### SQLite, and no ORM
+`Statement.to_dict()` is already pure JSON at ~2KB, so a statement is stored as
+one blob with a few indexed columns beside it for listing. There is no relational
+shape to model, so an ORM would add a dependency and a migration story for
+nothing. WAL mode keeps a long history read from blocking an upload.
+
+Right at this scale and for years to come. It would be the wrong choice only if
+this became multi-tenant.
+
+### scrypt from the standard library, not bcrypt or argon2
+`hashlib.scrypt` costs ~0.11s per verification here — slow enough that guessing is
+impractical, fast enough for a login form — and adds **no dependency**, which
+matters in a project deliberately holding at six. `argon2-cffi` is the stronger
+choice on paper and is a drop-in swap at that one boundary if it is ever wanted.
 
 ---
 
@@ -137,5 +147,10 @@ to become a real test suite.
 - **`statements/` is gitignored**, along with `*.csv`, `*.tsv`, `*.xls[x]` and
   Excel lock files (`~$*`) — it holds real customer names, policy numbers and
   amounts.
-- **No authentication.** Do not expose the app publicly as-is; anyone reaching it
-  can read and download every loaded statement.
+- **Authentication exists, but the app is still not meant to be public.** It is
+  reachable over Tailscale only, and `tailscale funnel` (which would make it
+  public) is deliberately off.
+- **`data/` holds client PII and password hashes** and is gitignored. It is also
+  the only copy of history — back it up.
+- **No encryption at rest.** Anyone with access to the machine can read
+  `data/statements.db`. BitLocker is the cheap mitigation.

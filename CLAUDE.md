@@ -26,6 +26,13 @@ OCR additionally needs the Tesseract engine, which pip cannot install:
 winget install UB-Mannheim.TesseractOCR
 ```
 
+Accounts are created from the command line — there is no signup form:
+
+```bash
+python scripts/adduser.py add you@fignow.com --name "You" --admin
+python scripts/adduser.py list
+```
+
 There is **no test suite**. Verification is done by three report scripts that
 sweep every file in `statements/` and print measured results — treat these as
 the regression check after touching any parsing code:
@@ -61,7 +68,9 @@ CSV  → app/tabular.py   (delimiter sniff → per-column cleaning plan)
                     ↓
               Statement  ── _finalise() → PayoutCheck (the failsafe)
                     ↓
-        app/main.py (REST) → app/static (UI) · app/excel.py (.xlsx)
+              app/store.py (SQLite: statements, users, sessions)
+                    ↓
+        app/main.py (REST, behind app/auth.py) → app/static (UI) · app/excel.py
 ```
 
 ### The PDF geometry engine
@@ -136,6 +145,33 @@ The commission column is identified from `canonical_map` only — **never** by
 picking whichever column happens to match a reference, which would make the
 check circular and worthless.
 
+### Auth and persistence
+
+`app/auth.py` installs **one middleware** in front of everything. It is not a
+per-route dependency, because `main.py` mounts the frontend as a catch-all at
+`/` — a route-by-route guard would leave `index.html` and `app.js` public, so the
+UI would load and only the JSON would 401. That looks protected without being
+protected. `PUBLIC_PATHS` is therefore the complete anonymous surface.
+
+Browsers get a 303 to `/login`; `/api/*` gets 401 JSON, so `api()` in `app.js`
+can redirect on an expired session instead of rendering an HTML page into a
+`fetch`.
+
+Sessions are **rows in SQLite, not signed cookies** — a signed cookie cannot be
+revoked, so logout and disabling a user would both keep working until expiry.
+Passwords use stdlib `hashlib.scrypt` (~0.11s per verify), keeping the dependency
+count unchanged. There is **no signup route**; accounts come from
+`scripts/adduser.py`.
+
+`Secure` on the cookie is derived from the request scheme, not hardcoded: over
+Tailscale this is real HTTPS and the flag must be set, but a Secure cookie is
+never returned over `http://localhost` and local development could not log in.
+
+**Export scoping matters more than it looks.** In memory, "export all" meant
+today's uploads. Once statements persist it would mean *every statement ever
+uploaded by anyone*, so exports take explicit `?ids=`, and the UI sends its
+working set. An absent `ids=` falls back to the caller's last 24 hours.
+
 ### Cross-carrier export
 
 Carriers share no column names, so `CANONICAL_FIELDS` + `canonical_map()`
@@ -163,9 +199,11 @@ Hand-written templates declare the mapping; auto-detected layouts have it
   does not carry the expected line.
 - **Dates:** only an unambiguous 4-digit-year `mm/dd/yyyy` becomes a real Excel
   date. Two-digit years stay text rather than guessing the century.
-- Statements are held **in memory** (`STATEMENTS` in `app/main.py`); a restart
-  clears them. Static assets are served `no-store` because a cached
-  `index.html` against a fresh `app.js` silently breaks the UI.
+- Statements are **persisted in SQLite** (`app/store.py`, `data/statements.db`),
+  with the source file in `data/uploads/`. `data/` is gitignored — it holds the
+  same client PII as `statements/`, plus password hashes.
+- Static assets are served `no-store` because a cached `index.html` against a
+  fresh `app.js` silently breaks the UI.
 
 ## Known issues
 
