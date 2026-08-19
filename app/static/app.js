@@ -172,8 +172,16 @@ function renderViewer() {
 
 // Pinned to en-US: the statements are US-dollar documents and the table below
 // shows the raw values, so a locale-dependent separator would contradict both.
+// Null-safe: the view object in renderFailsafe builds every branch's text before
+// picking one by status, so money() is called on exported_total even for the
+// statuses that have none (an image-only scan extracts no amounts). Returning a
+// dash instead of throwing keeps the rest of renderViewer alive - when this threw,
+// the previous statement's table and pass banner stayed on screen under the new
+// statement's name, which is the most misleading thing this UI could do.
 const money = (v) =>
-  v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  typeof v === "number" && Number.isFinite(v)
+    ? v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    : "—";
 
 // The failsafe: do the commission amounts headed for Excel equal the total the
 // statement itself declares? Rendered above the table because a mismatch means
@@ -273,6 +281,19 @@ function setExportEnabled(enabled) {
 function renderTable(s) {
   const table = $("table");
   table.innerHTML = "";
+
+  // An image-only scan or an unrecognised layout yields no columns at all. Say so
+  // rather than leaving an empty <table>, which reads as "extracted nothing"
+  // indistinguishably from "still loading".
+  if (!s.columns.length) {
+    const tr = table.insertRow();
+    const td = tr.insertCell();
+    td.className = "table-empty";
+    td.textContent = s.warnings.length
+      ? "Nothing extracted — see “Needs review” above."
+      : "Nothing extracted from this file.";
+    return;
+  }
 
   const thead = table.createTHead();
   const hr = thead.insertRow();

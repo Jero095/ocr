@@ -295,6 +295,16 @@ body {
 
 .hint { font-size: 12px; margin: 8px 0 0; flex: none; }
 
+/* Shown in place of the table when a file yielded no columns (image-only scan,
+   unrecognised layout). Deliberately quiet - the reason lives in the warning
+   panel above; this only stops the pane looking blank or half-loaded. */
+.table-empty {
+  padding: 28px 16px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .pdf-pane iframe {
   width: 100%;
   flex: 1;
