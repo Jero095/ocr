@@ -22,7 +22,15 @@ import io
 import re
 from dataclasses import dataclass
 
-from .extract import Statement, _finalise, carrier_from_filename, to_float
+from .extract import (
+    TOTAL_RE,
+    Statement,
+    _finalise,
+    _score,
+    carrier_from_filename,
+    split_trailing_total,
+    to_float,
+)
 
 DELIMITERS = [",", ";", "\t", "|"]
 
@@ -209,6 +217,62 @@ def _drop_marker(row: dict[str, str]) -> str | None:
     return None
 
 
+def _split_totals_row(stmt: Statement) -> None:
+    """Move a trailing totals row out of stmt.rows and into stmt.totals.
+
+    The PDF path has done this since the beginning (TOTAL_RE); the delimited path
+    had no equivalent, so any export closing with a totals row counted it as a
+    transaction and doubled the payout - 'Chris Leef 197.45.tsv' exported 394.90.
+
+    Two detectors, tried in order:
+
+    1. **Labelled** - a cell says "Total"/"Totals"/"Subtotal". Unlike the PDF
+       path, the keyword alone is not enough here: insurance data is full of
+       businesses called "Total Comfort Heating", and one landing on the last row
+       would silently lose a real commission. The row must *also* be sparser than
+       the rows above it, which a real policyholder line never is.
+    2. **Unlabelled** - delegated to split_trailing_total(), which decides purely
+       on whether the figures reconcile.
+
+    Per this module's convention the change is reported in stmt.cleanup rather
+    than applied silently. Populating stmt.totals also enables the per-column
+    checks, which delimited sources previously never got.
+    """
+    if len(stmt.rows) < 2:
+        return
+
+    filled = lambda row: sum(1 for v in row.values() if v)  # noqa: E731
+    candidate, above = stmt.rows[-1], stmt.rows[:-1]
+    detected = ""
+
+    if TOTAL_RE.search(" ".join(candidate.values())) and filled(candidate) < min(
+        filled(r) for r in above
+    ):
+        stmt.rows, stmt.totals = above, candidate
+        detected = "labelled"
+    else:
+        stmt.rows, trailing = split_trailing_total(stmt.rows, stmt.columns)
+        if trailing is not None:
+            stmt.totals = trailing
+            detected = "unlabelled"
+
+    if not detected:
+        return
+
+    stmt.checks = _score(stmt.rows, stmt.totals, stmt.columns)[2]
+    label = next((v for v in stmt.totals.values() if v), "the last row")
+    stmt.cleanup.append(
+        CleanupNote(
+            label,
+            "dropped",
+            f"Treated the final row as the statement's totals row "
+            f"({detected}), not a transaction. Counting it as data would have "
+            f"double-counted the payout. Its figures now cross-check the rows "
+            f"above instead.",
+        ).to_dict()
+    )
+
+
 def _clean_value(raw: str, plan: ColumnPlan) -> str:
     s = (raw or "").strip()
     if not s:
@@ -296,6 +360,8 @@ def parse_delimited(path: str, filename: str) -> Statement:
         stmt.rows.append(row)
 
     stmt.cleanup = [p.note.to_dict() for p in plans.values() if p.note]
+    # After stmt.cleanup exists: _split_totals_row appends its own note to it.
+    _split_totals_row(stmt)
     if dropped:
         seen = ", ".join(sorted(set(dropped)))
         stmt.cleanup.append(

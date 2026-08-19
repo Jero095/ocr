@@ -575,6 +575,60 @@ def _looks_like_data(cells: dict[str, str]) -> bool:
     return any(to_float(v) is not None for v in filled)
 
 
+TOTAL_TOL = 0.01  # cent-level: these are printed figures, not computed ones
+
+
+def split_trailing_total(
+    rows: list[dict[str, str]], columns: list[str]
+) -> tuple[list[dict[str, str]], dict[str, str] | None]:
+    """Separate a trailing *unlabelled* totals row from the data rows.
+
+    TOTAL_RE only sees rows that say "total". Some carriers close the table with
+    a producer subtotal labelled by the agency's own code and name instead:
+    Grundy-Phly prints "100360 - Financial Insurance", FARMERS-ALLIANCE prints
+    "110076 FIG FINANCIAL INSURANCE GROUP INC-BURLEY:". Neither contains the
+    word, so both were counted as transactions and doubled the payout exactly.
+
+    Detection is arithmetic, never positional or keyword-based: the candidate is
+    a total only if *every* figure it carries equals the sum of that column over
+    the rows above it. That is the same principle the auto-detector already runs
+    on - the arithmetic decides, so no per-carrier pattern is needed and a
+    carrier that labels its total normally is unaffected.
+
+    Two guards keep it from eating real data:
+
+    - At least two columns must reconcile. One matching column is a coincidence;
+      two independent ones agreeing to the cent is not.
+    - The candidate must carry fewer filled cells than every row above it. This
+      is what protects the single-data-row case, where "the sum of the rows
+      above" is just that one row: a genuinely duplicated transaction repeats its
+      policy number and dates, whereas a subtotal line leaves them blank.
+
+    Returns (data_rows, totals_row_or_None) and leaves rows untouched when no
+    candidate qualifies.
+    """
+    if len(rows) < 2:
+        return rows, None
+
+    candidate, above = rows[-1], rows[:-1]
+    figures = {c: to_float(candidate.get(c, "")) for c in columns}
+    figures = {c: v for c, v in figures.items() if v is not None}
+    if len(figures) < 2:
+        return rows, None
+
+    for col, stated in figures.items():
+        values = [to_float(r.get(col, "")) for r in above]
+        values = [v for v in values if v is not None]
+        if not values or abs(sum(values) - stated) > TOTAL_TOL:
+            return rows, None
+
+    filled = lambda row: sum(1 for v in row.values() if v)  # noqa: E731
+    if filled(candidate) >= min(filled(r) for r in above):
+        return rows, None
+
+    return above, candidate
+
+
 def _looks_like_header(band: list[dict], rotated: bool) -> bool:
     texts = [_text(w, rotated) for w in band]
     if len(texts) < MIN_CELLS:
@@ -633,6 +687,12 @@ def _auto_detect(pages) -> tuple | None:
 
             if not rows:
                 continue
+            if not totals_rows:
+                # No row said "total" - the table may still close with an
+                # unlabelled producer subtotal. Only trusted if it reconciles.
+                rows, trailing = split_trailing_total(rows, names)
+                if trailing is not None:
+                    totals_rows = [trailing]
             totals = totals_rows[-1] if totals_rows else {}
             passing, nrows, checks = _score(rows, totals, names)
             # Prefer tables that reconcile; break ties on row count.

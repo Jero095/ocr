@@ -4,7 +4,7 @@ Every capability the app currently has. Status is **measured** — the figures
 here come from `scripts/carriers_report.py` and `scripts/failsafe_report.py`
 sweeping every file in `statements/`, not from intent.
 
-Current coverage: **46 carriers / 57 files** — 14 verified, 14 unverified,
+Current coverage: **46 carriers / 57 files** — 16 verified, 12 unverified,
 2 with no locatable table, 16 blocked on OCR.
 
 ---
@@ -44,6 +44,19 @@ nothing.
 A `Template` declares only what is carrier-specific: header tokens, the row
 pattern, the canonical column mapping, and an optional `base × rate == result`
 check. Geometry is shared. Currently: Chris Leef, Vertigo.
+
+### Totals rows recognised by arithmetic, not keyword
+
+A table's closing totals row must never be counted as a transaction — it doubles
+the payout exactly. Rows saying "Total" are caught by keyword, but Grundy-Phly and
+FARMERS-ALLIANCE close with a producer subtotal labelled only by the agency's own
+code and name. Those are caught by **arithmetic**: the row is a total only if every
+figure it carries equals the column sum of the rows above, at least two columns
+agree, and it is sparser than the rows above it. No per-carrier pattern involved,
+and a carrier that labels its total normally is unaffected.
+
+The delimited path applies the same test, and requires the sparseness guard even
+for keyword matches — an insured named "Total Comfort Heating" must not be dropped.
 
 ### Self-validating auto-detection
 For unknown carriers, every plausible header band is tried and the one whose
@@ -116,7 +129,9 @@ against references sourced outside the table:
    received and section subtotals cannot produce a false pass.
 
 Verdicts: `match` · `mismatch` · `no_reference` · `no_amounts`. Current results:
-**PASS 13 · FAIL 2 · could not run 31** (per carrier).
+**PASS 14 · FAIL 1 · could not run 31** (per carrier). The one FAIL is
+`FARMERS-ALLIANCE 124.23.pdf`, whose filename transposes two digits of the
+124.03 the statement itself declares — a naming error the failsafe caught.
 
 Design constraints:
 - The commission column is identified from the canonical mapping **only** —

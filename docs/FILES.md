@@ -96,8 +96,12 @@ Produces the same `Statement`, so everything downstream is unchanged.
   content, not position.
 - `CleanupNote` — every change is reported to the UI rather than applied silently.
 
-**Known gap:** no totals-row detection, unlike the PDF path's `TOTAL_RE`. Any
-CSV containing a totals row double-counts.
+- `_split_totals_row()` — moves a trailing totals row out of the data rows, so a
+  CSV that closes with one no longer double-counts. Tries the labelled case first
+  (keyword *and* sparser than the rows above — a policyholder called "Total
+  Comfort Heating" must not be discarded), then delegates to
+  `split_trailing_total()` for unlabelled ones. Also populates `stmt.totals`,
+  which gives delimited sources the per-column checks they previously never got.
 
 ---
 

@@ -132,10 +132,21 @@ Hand-written templates declare the mapping; auto-detected layouts have it
 
 ## Known issues
 
-- **Totals-row leak (open).** Three files double-count because a totals or
-  subtotal row passes the data-row test: `FARMERS-ALLIANCE`, `Grundy-Phly`, and
-  any CSV/TSV containing a totals row — `app/tabular.py` has **no totals-row
-  detection at all**, unlike the PDF path's `TOTAL_RE`. One fix clears all three.
+- **Totals-row leak (fixed).** `split_trailing_total()` in `app/extract.py` now
+  catches totals rows that `TOTAL_RE` cannot see because they carry no "total"
+  keyword — Grundy-Phly and FARMERS-ALLIANCE close their tables with a producer
+  subtotal labelled by the agency's own code and name. Detection is **arithmetic**:
+  the row is a total only if every figure it carries equals the column sum of the
+  rows above, with at least two columns agreeing and the row sparser than those
+  above it (that guard is what protects the single-data-row case). `tabular.py`
+  gained `_split_totals_row()`, which tries the labelled case first — keyword
+  *plus* the sparseness guard, because "Total Comfort Heating" is a plausible
+  insured name — then falls back to the arithmetic test.
+- **`FARMERS-ALLIANCE 124.23.pdf` is misnamed** and still reports a failsafe
+  mismatch as a result. The statement declares `Commission Due Agency 124.03` and
+  its two transactions sum to exactly that; the filename's `124.23` transposes two
+  digits. Renaming the file to `124.03` clears it. This is a data-entry error the
+  failsafe caught, not a parser bug — do not "fix" it in code.
 - **Auto-detector can pick a non-table band.** United Life parses 27 rows from
   the address block; TransAmerica and Guard grab letterhead. They report amber
   and export nothing, but present as "parsed N rows". `_looks_like_header` should
