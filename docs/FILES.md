@@ -5,7 +5,7 @@ What each file is responsible for, and the load-bearing pieces inside it.
 ```
 CLAUDE.md                     guidance for Claude Code
 CARRIERS.md                   generated per-carrier support registry
-requirements.txt              5 runtime deps
+requirements.txt              6 runtime deps + the Tesseract engine
 .gitignore                    excludes client data
 .claude/launch.json           dev-server config for the Browser pane
 docs/
@@ -14,18 +14,20 @@ docs/
   FILES.md                    this file
 app/
   __init__.py                 marks app/ a package (empty)
-  extract.py     846 lines    PDF geometry engine, templates, failsafe, Statement
-  tabular.py     317 lines    CSV/TSV loading and cleaning
+  extract.py     971 lines    PDF geometry engine, templates, failsafe, Statement
+  ocr.py         226 lines    OCR for image-only scans -> word boxes in points
+  tabular.py     383 lines    CSV/TSV loading and cleaning
   excel.py       247 lines    .xlsx workbook construction
   main.py        205 lines    FastAPI routes, in-memory store, export guard
   static/
-    app.js       405 lines    all frontend behaviour
-    style.css    475 lines    design tokens, dark/light, layout
+    app.js       426 lines    all frontend behaviour
+    style.css    485 lines    design tokens, dark/light, layout
     index.html    77 lines    page skeleton
 scripts/
   carriers_report.py  194     sweeps statements/, regenerates CARRIERS.md
   failsafe_report.py   37     per-file payout reconciliation table
-statements/                   real client statements — gitignored
+  ocr_report.py       147     OCR settings swept against the scans
+statements/                   real client statements - gitignored
 ```
 
 ---
@@ -78,6 +80,23 @@ each carries the measurement in a comment.
 
 ---
 
+## `app/ocr.py` — the OCR tier
+
+Called from `parse_pdf` only when a page yields no words. Produces the same word
+dicts as `extract_words()`, so nothing downstream changes.
+
+- `available()` — (usable, reason). Reason is surfaced to the UI, so a missing
+  Tesseract install explains itself instead of looking like a parse failure.
+- `_find_tesseract()` — PATH, then `TESSERACT_CMD`, then the standard Windows
+  install paths (the installer does not always reach an open shell's PATH).
+- `page_words()` — rasterise, choose a rotation, OCR, scale pixels to points.
+  Returns a note describing DPI, rotation, word count and mean confidence, which
+  lands in `stmt.warnings` so the reader knows the figures came from OCR.
+- `_words()` — converts one `image_to_data` result, returning mean confidence and
+  a discard count so rotations can be compared on measurement.
+- Constants: `RENDER_DPI`, `TESSERACT_CONFIG` (`--psm 6`), `MIN_CONF`. All
+  measured via `scripts/ocr_report.py`; the rationale is in the module docstring.
+
 ## `app/tabular.py` — delimited exports
 
 Produces the same `Statement`, so everything downstream is unchanged.
@@ -95,7 +114,6 @@ Produces the same `Statement`, so everything downstream is unchanged.
 - `_drop_marker()` / `DROP_ROW_MARKERS` — removes non-transaction rows by
   content, not position.
 - `CleanupNote` — every change is reported to the UI rather than applied silently.
-
 - `_split_totals_row()` — moves a trailing totals row out of the data rows, so a
   CSV that closes with one no longer double-counts. Tries the labelled case first
   (keyword *and* sparser than the rows above — a policyholder called "Total
@@ -172,6 +190,7 @@ Together these are the regression suite — there is no `pytest`.
 | Task | File |
 |---|---|
 | Add a carrier template | `extract.py` → `TEMPLATES` |
+| Change OCR accuracy settings | `ocr.py` → constants; re-run `scripts/ocr_report.py` |
 | Fix a mis-detected column | `extract.py` → `_CANONICAL_PATTERNS` |
 | Change date/amount cleaning | `tabular.py` → `_plan_column`, `_clean_value` |
 | Drop another junk row | `tabular.py` → `DROP_ROW_MARKERS` |

@@ -39,6 +39,8 @@ from dataclasses import dataclass, field, asdict
 
 import pdfplumber
 
+from . import ocr
+
 # --- geometry tunables -------------------------------------------------------
 # Words within this distance on the row axis belong to the same line.
 LINE_TOL = 3.0
@@ -126,6 +128,9 @@ _CANONICAL_PATTERNS: list[tuple[str, list[str]]] = [
         # alongside what is actually paid this statement, and the declared total
         # is the payment: US Risk earns 1,696.15 but pays 961.02.
         r"current\s*pmt", r"pay\s*amt", r"net\s*pay", r"check\s*amount",
+        # "Amount Paid" (Heacock). The reversed forms below - paid\s*amount,
+        # amt\.?\s*paid - do not match this word order.
+        r"amount\s*paid",
         r"comm(ission)?\s*(amount|amt|\$|paid|due)", r"total\s+commission",
         r"^comm\s*\$$", r"^commission$",
         # Observed variants across the carriers in statements/. Kept specific:
@@ -388,10 +393,22 @@ def parse_pdf(path: str, filename: str) -> Statement:
     # Rotation is per page: a statement can mix a rotated table page with an
     # unrotated cover or address page, so each page is grouped independently.
     pages: list[tuple[list[list[dict]], bool]] = []
+    ocr_notes: list[str] = []
     with pdfplumber.open(path) as pdf:
         for page in pdf.pages:
             rotated = (page.rotation or 0) % 360 == 180
-            pages.append((_lines(page.extract_words(), rotated), rotated))
+            words = page.extract_words()
+            if not words:
+                # No text layer on this page - an image-only scan. OCR returns the
+                # same word dicts in PDF points, already turned visually upright,
+                # so the span axis is the plain one and rotated stays False.
+                words, note = ocr.page_words(page)
+                if note:
+                    ocr_notes.append(f"Page {page.page_number}: {note}")
+                if words:
+                    rotated = False
+            pages.append((_lines(words, rotated), rotated))
+    stmt.warnings.extend(ocr_notes)
 
     found = None
     for lines, rotated in pages:
@@ -408,9 +425,10 @@ def parse_pdf(path: str, filename: str) -> Statement:
 
     if not found:
         if not any(line for lines, _ in pages for line in lines):
+            available, reason = ocr.available()
             stmt.warnings.append(
-                "No text layer - this PDF is an image-only scan. It needs OCR, "
-                "which this parser does not do."
+                "No text layer - this PDF is an image-only scan, and OCR "
+                + ("read nothing legible from it." if available else reason)
             )
             _finalise(stmt, pages)
             return stmt
@@ -669,9 +687,29 @@ def _auto_detect(pages) -> tuple | None:
             band_end = max(_row_axis(w, rotated) for w in band)
 
             rows, totals_rows = [], []
+            hits = misses = fused = lines_below = 0
             for line in lines:
                 if min(_row_axis(w, rotated) for w in line) <= band_end:
                     continue
+                lines_below += 1
+                # Assign words by the same max-overlap rule _cells uses, but count
+                # how many *numeric* words share a column. Two figures in one cell
+                # is the signature of a wrong header band.
+                numeric_per_column: dict[int, int] = {}
+                for w in line:
+                    lo, hi = _span(w, rotated)
+                    at, overlap = None, 0.0
+                    for idx, (clo, chi) in enumerate(extents):
+                        ov = min(hi, chi) - max(lo, clo)
+                        if ov > overlap:
+                            at, overlap = idx, ov
+                    if at is None:
+                        misses += 1
+                        continue
+                    hits += 1
+                    if to_float(_text(w, rotated)) is not None:
+                        numeric_per_column[at] = numeric_per_column.get(at, 0) + 1
+                fused += sum(1 for n in numeric_per_column.values() if n >= 2)
                 cells = _cells(line, names, extents, rotated)
                 joined = " ".join(cells.values())
                 if TOTAL_RE.search(joined):
@@ -695,8 +733,35 @@ def _auto_detect(pages) -> tuple | None:
                     totals_rows = [trailing]
             totals = totals_rows[-1] if totals_rows else {}
             passing, nrows, checks = _score(rows, totals, names)
-            # Prefer tables that reconcile; break ties on row count.
-            key = (passing, nrows)
+
+            # Does this band's grid actually fit the rows beneath it? Two measures,
+            # because the obvious one is not enough on its own.
+            #
+            # `fused` counts cells that swallowed two or more figures. That is the
+            # decisive signal: a correct column holds one value per row, so a cell
+            # containing both "$137.00" and "12.00%" means the band's boundaries
+            # are wrong. Heacock's letterhead produced exactly that.
+            #
+            # `alignment` (fraction of words landing in any column) is the weaker
+            # tie-breaker and cannot lead, because a band with few wide columns
+            # scores *higher* on it than the real header - Heacock's letterhead got
+            # 0.88 against the true header's 0.83 by spanning the page with 9 loose
+            # columns. Ranking alignment first would pick the letterhead.
+            #
+            # Both sit below `passing`: reconciling against the statement's own
+            # totals remains the strongest evidence and must not be overridden.
+            # Ratios are per line and bucketed so noise does not outrank a
+            # genuinely larger table.
+            # Row count stays ahead of both. A stray data line can itself pass
+            # _looks_like_header - ALLIED-BENEFIT-BEAM has one reading
+            # "Tribal Fire Systems ... $258.22 x 10.0% = $25.82" - and sitting near
+            # the foot of the page it has few lines beneath it, so it scored a
+            # *better* fused ratio (1/8) than the real header (2/9) and won. It
+            # yielded one row against the real header's two, so row count is the
+            # discriminator that survives both cases.
+            fused_ratio = fused / lines_below if lines_below else 0.0
+            alignment = hits / (hits + misses) if (hits + misses) else 0.0
+            key = (passing, nrows, -round(fused_ratio * 10), round(alignment / 0.05))
             if best is None or key > best[0]:
                 best = (key, names, rows, totals, totals_rows[:-1], checks)
 

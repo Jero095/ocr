@@ -16,11 +16,13 @@ contested and the alternatives are still reasonable.
 | Multipart uploads | python-multipart | 0.0.20 |
 | PDF text + geometry | pdfplumber | 0.11.4 |
 | Excel writer | openpyxl | 3.1.5 |
+| OCR (scans) | pytesseract + Tesseract 5.4 | 0.3.13 |
 | Frontend | Plain HTML / CSS / JS | — |
 | Storage | In-process dict | — |
 
 ```bash
 pip install -r requirements.txt
+winget install UB-Mannheim.TesseractOCR      # OCR engine; pip cannot install it
 python -m uvicorn app.main:app --reload --port 8000
 ```
 
@@ -67,6 +69,18 @@ Consequence to know about: browser caching. Static assets are served
 `index.html` against a freshly-edited `app.js` silently half-breaks the UI —
 this cost real debugging time before being fixed.
 
+### pytesseract + Tesseract
+16 carriers ship scans with no text layer. Tesseract is weak at *table* structure,
+which would normally rule it out — but that does not matter here, because
+`image_to_data` returns per-word bounding boxes and the existing column engine
+already turns word boxes into tables. So the only job OCR has is producing word
+boxes, which Tesseract does well and for free, locally, with no client data
+leaving the machine.
+
+The engine binary is not pip-installable, so it is the one manual setup step.
+Accuracy settings (300 DPI, `--psm 6`, 25% confidence floor) were chosen by
+sweeping `scripts/ocr_report.py`, scored against the amounts in the filenames.
+
 ### openpyxl
 The Excel requirement is *typed cells* — real numbers with `#,##0.00`, percents
 as fractions, real dates — so figures are summable rather than text that merely
@@ -85,7 +99,7 @@ behind the same REST surface. The cost is real — a restart clears the list.
 
 | Not used | Why |
 |---|---|
-| **OCR** (Tesseract / AWS Textract) | Needed for 16 image-only carriers, not yet built. Tesseract is free but weak on messy tables; Textract (~$1.50/1k pages) is strong on tables. The current parser reads text layers only. |
+| **AWS Textract** | Tesseract now covers the scans (20 of 21 readable). Textract is stronger on tables but costs ~$1.50/1k pages and sends client PII to AWS. Worth revisiting only for the 4 carriers whose OCR figures fail the failsafe. |
 | **LLM extraction** | Considered as the structuring layer. The self-validating auto-detector reached 26 carriers without it, so it stays a fallback for layouts geometry cannot crack rather than the primary path. |
 | **A trained model** (LayoutLMv3 / Donut) | Evaluated and rejected at current volume. Break-even against a warm T4 (~$255/mo) is roughly 18,000 statements/month, and the labelled data would have to come from somewhere — realistically from running the API path first. Revisit at high volume, distilling from validated extractions. |
 | **pandas** | Never needed. Rows are `list[dict[str, str]]`; cleaning is per-column plans, and typing happens at the Excel boundary. Adding pandas would import a dataframe model the app does not use. |

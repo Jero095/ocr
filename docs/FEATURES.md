@@ -4,8 +4,9 @@ Every capability the app currently has. Status is **measured** — the figures
 here come from `scripts/carriers_report.py` and `scripts/failsafe_report.py`
 sweeping every file in `statements/`, not from intent.
 
-Current coverage: **46 carriers / 57 files** — 16 verified, 12 unverified,
-2 with no locatable table, 16 blocked on OCR.
+Current coverage: **46 carriers / 57 files** — 21 verified, 22 unverified,
+2 with no locatable table, 1 unreadable (`ISC 58.65.pdf` is a corrupt file, not a
+scan). OCR closed the image-only gap: it was 16 carriers, it is now none.
 
 ---
 
@@ -24,6 +25,23 @@ Current coverage: **46 carriers / 57 files** — 16 verified, 12 unverified,
   page 2).
 - **Wrapped multi-line headers.** A header split across five lines
   (Vertigo: `Policy` / `Effective` / `Date`) is reassembled into one column name.
+
+### Scanned statements (OCR)
+- **Image-only PDFs are read.** 16 carriers ship scans with no text layer. OCR
+  rasterises each such page at 300 DPI, recovers per-word bounding boxes, and
+  hands them to the same column engine the digital PDFs use — so templates, totals
+  detection, per-column checks and the failsafe all apply to a scan unchanged.
+- **Sideways scans are straightened.** Many are stored as a portrait page holding
+  landscape content. The rotation is chosen by which one yields the most confident
+  words, not by trusting Tesseract's orientation detector (which reported 13.83%
+  confidence on a page it read correctly).
+- **Every OCR read is labelled.** The warning panel reports DPI, rotation, word
+  count and mean confidence, so a figure read by OCR is never mistaken for one
+  read from a text layer.
+- **OCR misreads are caught, not exported.** OCR confuses digits, so the failsafe
+  is what makes this usable: 4 carriers currently extract figures that fail
+  reconciliation and are blocked from export.
+- Only pages *without* a text layer are OCR'd — digital PDFs are untouched.
 
 ### Delimited exports (CSV / TSV / TXT)
 - **Delimiter sniffing** across `,` `;` `\t` `|`, chosen by column-count
@@ -129,9 +147,10 @@ against references sourced outside the table:
    received and section subtotals cannot produce a false pass.
 
 Verdicts: `match` · `mismatch` · `no_reference` · `no_amounts`. Current results:
-**PASS 14 · FAIL 1 · could not run 31** (per carrier). The one FAIL is
+**PASS 17 · FAIL 5 · could not run 24** (per carrier). The one FAIL is
 `FARMERS-ALLIANCE 124.23.pdf`, whose filename transposes two digits of the
-124.03 the statement itself declares — a naming error the failsafe caught.
+124.03 the statement itself declares — a naming error the failsafe caught. The
+other four are OCR misreads on scans, also correctly blocked.
 
 Design constraints:
 - The commission column is identified from the canonical mapping **only** —
@@ -207,8 +226,12 @@ Clipboard API is unavailable (non-secure context).
 
 ## Not implemented
 
-- **OCR.** 16 carriers are image-only scans and cannot be read at all. This is
-  the single largest coverage unlock.
+- **Reliable OCR on 4 carriers.** Burns & Wilcox, CNA, Flathead and TransAmerica
+  extract tables whose figures do not reconcile. Their scans carry fold lines;
+  fixing them needs image pre-processing or hand-written templates.
+- **`ISC 58.65.pdf`** reports 0 pages and cannot be opened at all — a corrupt
+  file that needs re-exporting from the carrier.
+
 - **Persistence.** Statements live in memory; a restart clears them.
 - **Authentication.** There is none — do not expose the app publicly as-is.
 - **LLM fallback** for layouts the auto-detector cannot crack.
