@@ -1,0 +1,177 @@
+# Files
+
+What each file is responsible for, and the load-bearing pieces inside it.
+
+```
+CLAUDE.md                     guidance for Claude Code
+CARRIERS.md                   generated per-carrier support registry
+requirements.txt              5 runtime deps
+.gitignore                    excludes client data
+.claude/launch.json           dev-server config for the Browser pane
+docs/
+  FEATURES.md                 every capability
+  STACK.md                    technology choices and rejected alternatives
+  FILES.md                    this file
+app/
+  __init__.py                 marks app/ a package (empty)
+  extract.py     846 lines    PDF geometry engine, templates, failsafe, Statement
+  tabular.py     317 lines    CSV/TSV loading and cleaning
+  excel.py       247 lines    .xlsx workbook construction
+  main.py        205 lines    FastAPI routes, in-memory store, export guard
+  static/
+    app.js       405 lines    all frontend behaviour
+    style.css    475 lines    design tokens, dark/light, layout
+    index.html    77 lines    page skeleton
+scripts/
+  carriers_report.py  194     sweeps statements/, regenerates CARRIERS.md
+  failsafe_report.py   37     per-file payout reconciliation table
+statements/                   real client statements — gitignored
+```
+
+---
+
+## `app/extract.py` — the core
+
+The largest and most intricate file. Owns the shared `Statement` model, so both
+ingestion paths and every consumer depend on it.
+
+**Data model**
+- `Statement` — the single shape everything downstream consumes: `columns`,
+  `rows`, `totals`, `subtotals`, `checks`, `payout`, `warnings`, plus
+  `cleanup`/`delimiter` used only by delimited sources. `to_dict()` feeds the
+  API; `to_tsv()` feeds clipboard and TSV export.
+- `Check` — one per-column row-sum vs stated-total comparison.
+- `PayoutCheck` — the failsafe verdict (`match` / `mismatch` / `no_reference` /
+  `no_amounts`), plus `references_disagree` when the filename and the statement's
+  own total contradict each other.
+- `Template` — per-carrier config only: header tokens, row pattern, canonical
+  mapping, optional rate check. Geometry is never per-carrier.
+
+**Geometry** (`_row_axis`, `_span`, `_text`, `_lines`, `_bands`, `_columns`, `_cells`)
+- `_span()` negates to `(-bottom, -top)` on rotated pages so ascending order
+  always means visual left-to-right. This is why one engine handles both
+  orientations.
+- `_bands()` merges lines within `BAND_GAP` — how wrapped headers work.
+- `_cells()` assigns words by **maximum interval overlap**, with no-overlap words
+  attaching to the previous cell. Read the docstring before changing it; the
+  distance-merge alternative was tried and breaks the Chris Leef totals line.
+
+**Recognition**
+- `TEMPLATES` — hand-written entries.
+- `_auto_detect()` — tries every plausible header band, keeps the one that best
+  reconciles against the statement's own totals.
+- `_looks_like_header` / `_looks_like_data` — the gates. `_FOOTER_RE` strips page
+  furniture (`Page 1 of 1`, print dates, emails) that otherwise parses as data.
+- `carrier_from_filename()` — strips amounts and `(1)` suffixes.
+
+**Canonical mapping** — `CANONICAL_FIELDS`, `_CANONICAL_PATTERNS`,
+`infer_canonical()`, `canonical_map()`. Lives here rather than in `excel.py`
+because the failsafe needs to know which column is the commission column.
+Payment patterns are ordered ahead of commission-earned patterns.
+
+**Failsafe** — `filename_amount()`, `declared_totals()`, `_payout_check()`,
+`_finalise()`. `_finalise()` is called on every `parse_pdf` exit path *and* by
+`tabular.py`, so the failsafe runs for every source type.
+
+**Tunables** — `LINE_TOL`, `BAND_GAP`, `MERGE_GAP`, `MIN_CELLS`. All measured;
+each carries the measurement in a comment.
+
+---
+
+## `app/tabular.py` — delimited exports
+
+Produces the same `Statement`, so everything downstream is unchanged.
+
+- `sniff()` — delimiter by column-count consistency across `,` `;` `\t` `|`.
+- `to_mdy()` — normalises `20260728`, `2026-07-28`, `07/28/2026 09:15`, `7-28-26`
+  to `mm/dd/yyyy`, discarding time; returns `None` on anything unrecognised.
+- `_plan_column()` — classifies each column (`text` / `date` / `money` /
+  `percent`) and decides whether it needs rescaling. This is where the
+  conservative rules live: implied decimals only when there is no decimal point
+  anywhere *and* all values are integers; a `dd/mm` guard when a first component
+  exceeds 12.
+- `_resolve_percent_scale()` — derives an ambiguous percent scale from
+  `amount / base` rather than assuming ÷100.
+- `_drop_marker()` / `DROP_ROW_MARKERS` — removes non-transaction rows by
+  content, not position.
+- `CleanupNote` — every change is reported to the UI rather than applied silently.
+
+**Known gap:** no totals-row detection, unlike the PDF path's `TOTAL_RE`. Any
+CSV containing a totals row double-counts.
+
+---
+
+## `app/excel.py` — workbook construction
+
+- `build_workbook()` — assembles `All Rows` (cross-carrier), one sheet per
+  statement, and `Validation` (failsafe first, then per-column checks and
+  warnings).
+- `_write()` — the typing boundary. Decides real date vs percent-as-fraction vs
+  money vs text. `STRICT_MDY_RE` only accepts 4-digit years; anything less
+  certain stays text.
+- `_statement_sheet` / `_all_rows_sheet` / `_checks_sheet` — per-sheet builders.
+- `_sheet_name()` — Excel's constraints (≤31 chars, no `[]:*?/\`, unique).
+- `_autosize`, `_style_header`, and the style constants.
+
+Imports its canonical mapping from `extract.py`; does not define its own.
+
+---
+
+## `app/main.py` — API and wiring
+
+- Upload routing: `.pdf` → `parse_pdf`, `.csv/.tsv/.txt` → `parse_delimited`,
+  anything else → 400.
+- `STATEMENTS` — the in-memory store. Swap point for SQLite.
+- `_guard_failsafe()` — raises **409** on any export whose failsafe failed. The
+  UI disables the buttons, but the endpoints are directly reachable, so this is
+  the real enforcement.
+- Endpoints: upload, list, fetch one, per-statement TSV/XLSX, combined
+  `export.tsv`/`export.xlsx`, original source file, delete.
+- `NoCacheStatic` — serves the frontend `no-store`.
+
+---
+
+## `app/static/`
+
+**`app.js`** — no framework, no build. `state` holds the loaded statements;
+`renderList` / `renderViewer` / `renderTable` / `renderFailsafe` / `renderCleanup`
+redraw from it. `setExportEnabled()` disables Copy/Excel/TSV while the failsafe
+fails. `copy()` falls back to a hidden textarea outside secure contexts. `money()`
+is pinned to `en-US` so separators match the source documents.
+
+**`style.css`** — CSS custom properties for both themes, then components
+(topbar, sidebar, drop zone, table, failsafe banner, cleanup tags, toast).
+Uses `color-mix()` for status tints so one token drives every state colour.
+
+**`index.html`** — skeleton only; every dynamic region is an empty element that
+`app.js` fills.
+
+---
+
+## `scripts/`
+
+**`carriers_report.py`** — parses every file in `statements/`, buckets each
+carrier by measured outcome (`verified` / `unverified` / `no-table` / `needs-ocr`
+/ `crash`), and regenerates `CARRIERS.md`. Handles PDFs and CSVs. Run after any
+parsing change.
+
+**`failsafe_report.py`** — per-file table of failsafe status, exported total,
+filename total, statement total and commission column; flags where the two
+references disagree. Ends with a list of files whose export is blocked.
+
+Together these are the regression suite — there is no `pytest`.
+
+---
+
+## Where to make common changes
+
+| Task | File |
+|---|---|
+| Add a carrier template | `extract.py` → `TEMPLATES` |
+| Fix a mis-detected column | `extract.py` → `_CANONICAL_PATTERNS` |
+| Change date/amount cleaning | `tabular.py` → `_plan_column`, `_clean_value` |
+| Drop another junk row | `tabular.py` → `DROP_ROW_MARKERS` |
+| Change Excel typing/formats | `excel.py` → `_write` |
+| Add an endpoint | `main.py` |
+| Change the UI | `static/app.js` + `static/style.css` |
+| Add a new source type | produce a `Statement`; call `_finalise()` |
