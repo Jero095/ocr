@@ -13,3 +13,7 @@ __pycache__/
 venv/
 .env
 .DS_Store
+
+# Persisted statements, uploaded source files and password hashes.
+# Same client data as statements/, so never committed.
+data/

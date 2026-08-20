@@ -16,11 +16,13 @@ contested and the alternatives are still reasonable.
 | Multipart uploads | python-multipart | 0.0.20 |
 | PDF text + geometry | pdfplumber | 0.11.4 |
 | Excel writer | openpyxl | 3.1.5 |
+| OCR (scans) | pytesseract + Tesseract 5.4 | 0.3.13 |
 | Frontend | Plain HTML / CSS / JS | — |
-| Storage | In-process dict | — |
+| Storage | SQLite (stdlib `sqlite3`), WAL | — |
 
 ```bash
 pip install -r requirements.txt
+winget install UB-Mannheim.TesseractOCR      # OCR engine; pip cannot install it
 python -m uvicorn app.main:app --reload --port 8000
 ```
 
@@ -67,6 +69,18 @@ Consequence to know about: browser caching. Static assets are served
 `index.html` against a freshly-edited `app.js` silently half-breaks the UI —
 this cost real debugging time before being fixed.
 
+### pytesseract + Tesseract
+16 carriers ship scans with no text layer. Tesseract is weak at *table* structure,
+which would normally rule it out — but that does not matter here, because
+`image_to_data` returns per-word bounding boxes and the existing column engine
+already turns word boxes into tables. So the only job OCR has is producing word
+boxes, which Tesseract does well and for free, locally, with no client data
+leaving the machine.
+
+The engine binary is not pip-installable, so it is the one manual setup step.
+Accuracy settings (300 DPI, `--psm 6`, 25% confidence floor) were chosen by
+sweeping `scripts/ocr_report.py`, scored against the amounts in the filenames.
+
 ### openpyxl
 The Excel requirement is *typed cells* — real numbers with `#,##0.00`, percents
 as fractions, real dates — so figures are summable rather than text that merely
@@ -74,10 +88,20 @@ looks right. `openpyxl` also does frozen panes, autofilter, and per-cell fonts
 and borders. `xlsxwriter` writes only; `openpyxl` reads too, which the
 verification scripts use to assert what was actually written.
 
-### In-memory storage, not SQLite
-Deliberate for now: no schema, no migrations, no file locking. `STATEMENTS` is a
-single dict in `app/main.py` and swapping it for SQLite is a contained change
-behind the same REST surface. The cost is real — a restart clears the list.
+### SQLite, and no ORM
+`Statement.to_dict()` is already pure JSON at ~2KB, so a statement is stored as
+one blob with a few indexed columns beside it for listing. There is no relational
+shape to model, so an ORM would add a dependency and a migration story for
+nothing. WAL mode keeps a long history read from blocking an upload.
+
+Right at this scale and for years to come. It would be the wrong choice only if
+this became multi-tenant.
+
+### scrypt from the standard library, not bcrypt or argon2
+`hashlib.scrypt` costs ~0.11s per verification here — slow enough that guessing is
+impractical, fast enough for a login form — and adds **no dependency**, which
+matters in a project deliberately holding at six. `argon2-cffi` is the stronger
+choice on paper and is a drop-in swap at that one boundary if it is ever wanted.
 
 ---
 
@@ -85,7 +109,7 @@ behind the same REST surface. The cost is real — a restart clears the list.
 
 | Not used | Why |
 |---|---|
-| **OCR** (Tesseract / AWS Textract) | Needed for 16 image-only carriers, not yet built. Tesseract is free but weak on messy tables; Textract (~$1.50/1k pages) is strong on tables. The current parser reads text layers only. |
+| **AWS Textract** | Tesseract now covers the scans (20 of 21 readable). Textract is stronger on tables but costs ~$1.50/1k pages and sends client PII to AWS. Worth revisiting only for the 4 carriers whose OCR figures fail the failsafe. |
 | **LLM extraction** | Considered as the structuring layer. The self-validating auto-detector reached 26 carriers without it, so it stays a fallback for layouts geometry cannot crack rather than the primary path. |
 | **A trained model** (LayoutLMv3 / Donut) | Evaluated and rejected at current volume. Break-even against a warm T4 (~$255/mo) is roughly 18,000 statements/month, and the labelled data would have to come from somewhere — realistically from running the API path first. Revisit at high volume, distilling from validated extractions. |
 | **pandas** | Never needed. Rows are `list[dict[str, str]]`; cleaning is per-column plans, and typing happens at the Excel boundary. Adding pandas would import a dataframe model the app does not use. |
@@ -123,5 +147,10 @@ to become a real test suite.
 - **`statements/` is gitignored**, along with `*.csv`, `*.tsv`, `*.xls[x]` and
   Excel lock files (`~$*`) — it holds real customer names, policy numbers and
   amounts.
-- **No authentication.** Do not expose the app publicly as-is; anyone reaching it
-  can read and download every loaded statement.
+- **Authentication exists, but the app is still not meant to be public.** It is
+  reachable over Tailscale only, and `tailscale funnel` (which would make it
+  public) is deliberately off.
+- **`data/` holds client PII and password hashes** and is gitignored. It is also
+  the only copy of history — back it up.
+- **No encryption at rest.** Anyone with access to the machine can read
+  `data/statements.db`. BitLocker is the cheap mitigation.
