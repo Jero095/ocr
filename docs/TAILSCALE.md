@@ -80,8 +80,20 @@ tailscale serve status
 
 Tiene que decir `(tailnet only)` y apuntar a `http://127.0.0.1:8000`.
 
-La configuración de `serve` **sobrevive reinicios**; uvicorn no. Por eso después
-de reiniciar la PC el app responde 502 hasta que se levanta uvicorn de nuevo.
+La configuración de `serve` **sobrevive reinicios**; uvicorn no. Por eso hay un
+acceso directo en la carpeta de inicio de Windows que levanta el app al entrar a
+la sesión:
+
+```
+%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Statement Reader.lnk
+```
+
+Apunta a `scripts/start_server_hidden.vbs`, que ejecuta `scripts/start_server.bat`
+sin ventana de consola. El log queda en `data/server.log`. Para que deje de
+arrancar solo, borrá ese acceso directo.
+
+Si el app responde 502, es que `serve` está bien y uvicorn no está corriendo:
+ejecutá el `.vbs` a mano o revisá `data/server.log`.
 
 ### Dejar de publicar
 
@@ -170,8 +182,8 @@ tailscale version
 
 ## Problemas comunes
 
-**502 Bad Gateway.** Tailscale funciona; uvicorn no está corriendo. `serve`
-persiste entre reinicios y el app no. Levantar uvicorn.
+**502 Bad Gateway.** Tailscale funciona; uvicorn no está corriendo. Ejecutar
+`scripts/start_server_hidden.vbs` y revisar `data/server.log`.
 
 **No entra desde otro equipo.** Revisar en orden: (1) el equipo aparece en
 `tailscale status`, (2) está aprobado y no dice `Restricted`, (3) esta PC está
@@ -207,7 +219,7 @@ Dicho de otra forma: aprobar un dispositivo da acceso total a todos los
 statements. Las cuentas son lo que permite revocar a una persona sin sacar el
 equipo de la red, y lo que hace que quede registrado quién subió cada statement.
 
-Dos cosas que Tailscale tampoco cubre y siguen pendientes:
+Y una cosa que Tailscale tampoco cubre y sigue pendiente:
 
-- **Arranque automático** de uvicorn al prender la PC (por eso aparece el 502).
-- **Backup de `data/`**, que hoy es la única copia del historial.
+- **Backup de `data/`**, que hoy es la única copia del historial *y* de las
+  cuentas. Si se pierde el disco, se pierde todo.
