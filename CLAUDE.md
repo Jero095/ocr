@@ -11,7 +11,8 @@ source PDFs are frequently unusable via copy/paste.
 
 Companion docs: [docs/FEATURES.md](docs/FEATURES.md) ·
 [docs/STACK.md](docs/STACK.md) · [docs/FILES.md](docs/FILES.md) ·
-[CARRIERS.md](CARRIERS.md) (per-carrier support status)
+[CARRIERS.md](CARRIERS.md) (per-carrier support status) ·
+[docs/TAILSCALE.md](docs/TAILSCALE.md) (how it is served and shared; in Spanish)
 
 ## Commands
 

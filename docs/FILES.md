@@ -12,6 +12,7 @@ docs/
   FEATURES.md                 every capability
   STACK.md                    technology choices and rejected alternatives
   FILES.md                    this file
+  TAILSCALE.md                serving and sharing over Tailscale (es)
 app/
   __init__.py                 marks app/ a package (empty)
   extract.py     971 lines    PDF geometry engine, templates, failsafe, Statement
