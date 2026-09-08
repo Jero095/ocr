@@ -84,8 +84,13 @@ live in `TEMPLATES`. Three things make one engine serve wildly different pages:
    `_span()` negates to `(-bottom, -top)` so all downstream comparisons are
    plain ascending interval maths. Rotation is tracked **per line**, because a
    statement can mix a rotated table page with an unrotated address page.
-2. **Header bands.** Consecutive lines within `BAND_GAP` merge into one band,
-   which makes wrapped multi-line headers work for free.
+2. **Header bands.** Two passes. Consecutive lines within `BAND_GAP` merge by
+   distance, then `_merge_header_bands()` joins consecutive *header-like* bands
+   that are within `HEADER_MERGE_RATIO` x their character height. The second pass
+   exists because distance alone cannot do it: Appalachian leads its header lines
+   11.09pt apart while its data rows sit 10.87pt apart, so any `BAND_GAP` large
+   enough to join that header also fuses data rows. The content test is the
+   safety property - a data row can never qualify as header-like.
 3. **Overlap assignment.** `_cells()` assigns each word to the column it
    overlaps most — never by distance-merging words into runs. A word overlapping
    *no* column attaches to the previous cell (the wrapped-text case).
@@ -186,7 +191,10 @@ Hand-written templates declare the mapping; auto-detected layouts have it
 - **Constants are measured, not chosen.** `BAND_GAP = 8` sits between the widest
   intra-header line gap (5.0) and the narrowest header-to-data gap (11.1).
   `MERGE_GAP = 4.0` sits between 2.2 and 5.3 — the tightest margin in the
-  codebase. If you change either, re-run both report scripts and quote numbers.
+  codebase. `HEADER_MERGE_RATIO = 1.5` is a ratio to character height, not a
+  distance, because one line of normal leading is ~1.1x the font size at any
+  font size; measured against 1.11 (must join) and 2.80 (must not). If you change
+  any of them, re-run the report scripts and quote numbers.
 - **Never widen a pattern to force a match.** A wrongly-identified commission
   column produces a false PASS, which is worse than reporting that the failsafe
   could not run. Prefer flagging over guessing throughout.
@@ -223,6 +231,18 @@ Hand-written templates declare the mapping; auto-detected layouts have it
   its two transactions sum to exactly that; the filename's `124.23` transposes two
   digits. Renaming the file to `124.03` clears it. This is a data-entry error the
   failsafe caught, not a parser bug — do not "fix" it in code.
+- **Wrapped headers wider than `BAND_GAP` (fixed).** Six carriers print
+  two-line headers led further apart than 8pt, so only one line became the
+  header and the other line's columns were silently lost — Appalachian dropped
+  `Policy Number` and `Insured` entirely. `_merge_header_bands()` joins them by
+  content. Measured: verified 21 → 25, PASS 17 → 19, Guard and Pacific Life
+  newly reconciling, Appalachian 3 → 4 passing checks.
+- **YTD columns are excluded from canonical mapping.** `infer_canonical()` now
+  skips any column matching `_EXCLUDE_LABEL`. Found because fixing the header
+  merge gave SAIF its real column names, exposing that "Commission paid YTD"
+  matched the commission patterns ahead of "Commission paid this month" and
+  exported 115.60 for a 15.38 statement. A cumulative figure is never what the
+  statement pays. Also protects Appalachian's `Previous Paid`.
 - **Auto-detector can pick a non-table band (improved, not fixed).** Band
   scoring now includes two fit measures beyond `passing` and row count: `fused`
   (cells that swallowed two or more figures — the decisive one) and `alignment`
