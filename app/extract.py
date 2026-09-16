@@ -54,6 +54,11 @@ BAND_GAP = 8.0
 # is the tightest margin in the file - revisit it when adding a carrier.
 # Data cells are never merged by distance; see _cells for why.
 MERGE_GAP = 4.0
+# Two consecutive *header-like* bands join when the gap between them is at most
+# this multiple of the first band's character height. This is deliberately a
+# ratio, not a distance in points, and it is deliberately separate from
+# BAND_GAP - see _merge_header_bands for why neither could be avoided.
+HEADER_MERGE_RATIO = 1.5
 
 
 @dataclass(frozen=True)
@@ -155,11 +160,18 @@ def infer_canonical(columns: list[str]) -> dict[str, str]:
     """
     mapping: dict[str, str] = {}
     taken: set[str] = set()
+    # Cumulative and prior-period columns are excluded outright, using the same
+    # vocabulary that already keeps them from being read as a declared total.
+    # SAIF prints "Commission paid YTD" beside "Commission paid this month": both
+    # match the commission patterns, but a year-to-date figure is not what this
+    # statement pays, and mapping it exports 115.60 for a 15.38 statement.
+    # Appalachian's "Previous Paid" is the same shape of mistake.
+    candidates = [c for c in columns if not _EXCLUDE_LABEL.search(c)]
     for field_name, patterns in _CANONICAL_PATTERNS:
         for pattern in patterns:
             hit = next(
                 (
-                    c for c in columns
+                    c for c in candidates
                     if c not in taken and re.search(pattern, c.strip(), re.I)
                 ),
                 None,
@@ -321,7 +333,11 @@ def _lines(words, rotated: bool) -> list[list[dict]]:
 
 
 def _bands(lines: list[list[dict]], rotated: bool) -> list[list[dict]]:
-    """Merge consecutive lines that sit within BAND_GAP into one band."""
+    """Group lines into bands: by distance first, then by content.
+
+    See _merge_header_bands - the second pass is what makes wrapped headers work
+    when the carrier leads them wider apart than BAND_GAP.
+    """
     bands: list[list[dict]] = []
     prev: float | None = None
     for line in lines:
@@ -331,7 +347,66 @@ def _bands(lines: list[list[dict]], rotated: bool) -> list[list[dict]]:
         else:
             bands.append(list(line))
         prev = pos
-    return bands
+    return _merge_header_bands(bands, rotated)
+
+
+def _char_height(band: list[dict]) -> float:
+    """Median glyph height in a band - a proxy for its font size."""
+    heights = sorted(w["bottom"] - w["top"] for w in band)
+    return heights[len(heights) // 2] if heights else 0.0
+
+
+def _merge_header_bands(
+    bands: list[list[dict]], rotated: bool
+) -> list[list[dict]]:
+    """Join consecutive header-like bands that are one line of leading apart.
+
+    BAND_GAP alone cannot do this. Appalachian leads its two header lines 11.09pt
+    apart while its *data* rows sit 10.87pt apart - the header is spaced wider
+    than the data - so every BAND_GAP big enough to join the header also fuses
+    consecutive data rows into one band. That is why this is a separate pass
+    keyed on content rather than a bigger constant.
+
+    Two conditions, and both are load-bearing:
+
+    1. **Both bands must look like headers.** This is the safety property:
+       _looks_like_header requires numerics to be at most a third of tokens, so
+       a data row can never be merged by this pass no matter how close it sits.
+       Distance alone offers no such guarantee.
+    2. **The gap must be at most HEADER_MERGE_RATIO x the character height.** A
+       ratio rather than points, because one line of normal leading is ~1.1x the
+       font size at any font size, so this reads as "the immediately following
+       line of text". An absolute threshold is accidentally font-size dependent.
+
+       Measured on Appalachian, whose header is the case this exists for:
+
+           Effective Premium... + Policy Number Insured...   1.11   join
+           $148.16 TOTAL COMMISSIONS... + Thank you...       2.80   keep apart
+           **** PLEASE RETAIN **** + Total                   3.11   keep apart
+
+       1.5 sits between with margin either side.
+
+    This fixed six carriers that print two-line headers, not just Appalachian:
+    FARMERS-ALLIANCE, Pacific Life, SAIF, Grundy-Phly, United Life and Guard all
+    have header pairs in the 1.17-1.36 range. Re-run both report scripts if you
+    touch the ratio, and note that merging *enlarges* a band's token set, which
+    makes TEMPLATES more likely to match - so re-verify the template path too.
+    """
+    out: list[list[dict]] = []
+    for band in bands:
+        if out and _looks_like_header(out[-1], rotated) and _looks_like_header(
+            band, rotated
+        ):
+            previous = out[-1]
+            height = _char_height(previous)
+            gap = min(_row_axis(w, rotated) for w in band) - min(
+                _row_axis(w, rotated) for w in previous
+            )
+            if height > 0 and gap / height <= HEADER_MERGE_RATIO:
+                out[-1] = previous + list(band)
+                continue
+        out.append(list(band))
+    return out
 
 
 def _columns(band: list[dict], rotated: bool):
@@ -488,10 +563,11 @@ def parse_pdf(path: str, filename: str) -> Statement:
             stmt.rows.append(row)
 
     if totals_rows:
-        # The last totals-like line is the statement total; earlier ones are
-        # per-group subtotals (Vertigo prints one per payment date).
-        stmt.totals = totals_rows[-1]
-        stmt.subtotals = totals_rows[:-1]
+        # The last totals-like line carrying figures is the statement total;
+        # earlier ones are per-group subtotals (Vertigo prints one per payment
+        # date). See pick_totals_row for why "last" alone is not enough.
+        stmt.totals = pick_totals_row(totals_rows)
+        stmt.subtotals = [r for r in totals_rows if r is not stmt.totals]
     else:
         stmt.warnings.append("No totals row found - could not cross-check arithmetic.")
 
@@ -647,6 +723,28 @@ def split_trailing_total(
     return above, candidate
 
 
+def pick_totals_row(totals_rows: list[dict[str, str]]) -> dict[str, str]:
+    """Choose which totals-like row is *the* totals row.
+
+    The last one is usually right, but not always: Appalachian closes with
+    "TOTAL COMMISSIONS PAID THIS PERIOD:" - a caption carrying no figures at all -
+    below its real "TOTALS: $20,678.29 ... $148.16" line. Taking the last row
+    there left nothing to cross-check and dropped its passing column checks from
+    3 to 0, so a totals row with no numbers is treated as a label and skipped.
+
+    Falls back to the last row when none carries a number, so behaviour is
+    unchanged for every layout that does not have this problem.
+    """
+    if not totals_rows:
+        return {}
+    numeric = [
+        row
+        for row in totals_rows
+        if any(to_float(v) is not None for v in row.values())
+    ]
+    return (numeric or totals_rows)[-1]
+
+
 def _looks_like_header(band: list[dict], rotated: bool) -> bool:
     texts = [_text(w, rotated) for w in band]
     if len(texts) < MIN_CELLS:
@@ -731,7 +829,7 @@ def _auto_detect(pages) -> tuple | None:
                 rows, trailing = split_trailing_total(rows, names)
                 if trailing is not None:
                     totals_rows = [trailing]
-            totals = totals_rows[-1] if totals_rows else {}
+            totals = pick_totals_row(totals_rows)
             passing, nrows, checks = _score(rows, totals, names)
 
             # Does this band's grid actually fit the rows beneath it? Two measures,

@@ -4,7 +4,7 @@ Every capability the app currently has. Status is **measured** — the figures
 here come from `scripts/carriers_report.py` and `scripts/failsafe_report.py`
 sweeping every file in `statements/`, not from intent.
 
-Current coverage: **46 carriers / 57 files** — 21 verified, 22 unverified,
+Current coverage: **47 carriers / 58 files** — 25 verified, 19 unverified,
 2 with no locatable table, 1 unreadable (`ISC 58.65.pdf` is a corrupt file, not a
 scan). OCR closed the image-only gap: it was 16 carriers, it is now none.
 
@@ -25,6 +25,10 @@ scan). OCR closed the image-only gap: it was 16 carriers, it is now none.
   page 2).
 - **Wrapped multi-line headers.** A header split across five lines
   (Vertigo: `Policy` / `Effective` / `Date`) is reassembled into one column name.
+  Headers led wider apart than the distance threshold are joined by **content**
+  instead: two consecutive header-like bands within 1.5x their character height
+  merge, which is the only way to handle a carrier whose header lines sit further
+  apart than its data rows (Appalachian: 11.09pt vs 10.87pt).
 
 ### Scanned statements (OCR)
 - **Image-only PDFs are read.** 16 carriers ship scans with no text layer. OCR
@@ -147,7 +151,7 @@ against references sourced outside the table:
    received and section subtotals cannot produce a false pass.
 
 Verdicts: `match` · `mismatch` · `no_reference` · `no_amounts`. Current results:
-**PASS 17 · FAIL 5 · could not run 24** (per carrier). The one FAIL is
+**PASS 19 · FAIL 5 · could not run 23** (per carrier). The one FAIL is
 `FARMERS-ALLIANCE 124.23.pdf`, whose filename transposes two digits of the
 124.03 the statement itself declares — a naming error the failsafe caught. The
 other four are OCR misreads on scans, also correctly blocked.

@@ -15,7 +15,7 @@ docs/
   TAILSCALE.md                serving and sharing over Tailscale (es)
 app/
   __init__.py                 marks app/ a package (empty)
-  extract.py     971 lines    PDF geometry engine, templates, failsafe, Statement
+  extract.py    1069 lines    PDF geometry engine, templates, failsafe, Statement
   ocr.py         226 lines    OCR for image-only scans -> word boxes in points
   tabular.py     383 lines    CSV/TSV loading and cleaning
   store.py       533 lines    SQLite: statements, users, sessions
@@ -57,7 +57,13 @@ ingestion paths and every consumer depend on it.
 - `_span()` negates to `(-bottom, -top)` on rotated pages so ascending order
   always means visual left-to-right. This is why one engine handles both
   orientations.
-- `_bands()` merges lines within `BAND_GAP` — how wrapped headers work.
+- `_bands()` merges lines within `BAND_GAP`, then `_merge_header_bands()` joins
+  consecutive header-like bands within `HEADER_MERGE_RATIO` x character height.
+  The second pass is content-keyed on purpose — read its docstring before
+  touching it; a bigger `BAND_GAP` cannot substitute.
+- `pick_totals_row()` — the last totals-like row *carrying figures*. Appalachian
+  closes with a numberless "TOTAL COMMISSIONS PAID THIS PERIOD:" caption below
+  its real totals line.
 - `_cells()` assigns words by **maximum interval overlap**, with no-overlap words
   attaching to the previous cell. Read the docstring before changing it; the
   distance-merge alternative was tried and breaks the Chris Leef totals line.
@@ -79,7 +85,8 @@ Payment patterns are ordered ahead of commission-earned patterns.
 `_finalise()`. `_finalise()` is called on every `parse_pdf` exit path *and* by
 `tabular.py`, so the failsafe runs for every source type.
 
-**Tunables** — `LINE_TOL`, `BAND_GAP`, `MERGE_GAP`, `MIN_CELLS`. All measured;
+**Tunables** — `LINE_TOL`, `BAND_GAP`, `MERGE_GAP`, `HEADER_MERGE_RATIO`,
+`MIN_CELLS`. All measured;
 each carries the measurement in a comment.
 
 ---
