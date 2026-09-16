@@ -1,6 +1,18 @@
 const $ = (id) => document.getElementById(id);
 
-const state = { statements: [], activeId: null };
+const state = { statements: [], activeId: null, user: null };
+
+// Every request goes through here so an expired session lands on the login page
+// instead of failing silently. The gate in app/auth.py answers /api/* with 401
+// JSON rather than an HTML redirect precisely so this check is possible.
+async function api(url, options) {
+  const res = await fetch(url, options);
+  if (res.status === 401) {
+    location.href = "/login";
+    throw new Error("signed out");
+  }
+  return res;
+}
 
 /* ---------- helpers ---------- */
 
@@ -54,7 +66,7 @@ async function upload(files) {
     body.append("file", file);
 
     try {
-      const res = await fetch("/api/statements", { method: "POST", body });
+      const res = await api("/api/statements", { method: "POST", body });
       const data = await res.json();
       const i = state.statements.indexOf(placeholder);
       if (!res.ok) {
@@ -116,7 +128,7 @@ function renderList() {
       x.title = "Remove";
       x.onclick = async (e) => {
         e.stopPropagation();
-        await fetch(`/api/statements/${s.id}`, { method: "DELETE" });
+        await api(`/api/statements/${s.id}`, { method: "DELETE" });
         state.statements = state.statements.filter((v) => v.id !== s.id);
         if (state.activeId === s.id) state.activeId = state.statements.at(-1)?.id ?? null;
         renderList();
@@ -172,8 +184,16 @@ function renderViewer() {
 
 // Pinned to en-US: the statements are US-dollar documents and the table below
 // shows the raw values, so a locale-dependent separator would contradict both.
+// Null-safe: the view object in renderFailsafe builds every branch's text before
+// picking one by status, so money() is called on exported_total even for the
+// statuses that have none (an image-only scan extracts no amounts). Returning a
+// dash instead of throwing keeps the rest of renderViewer alive - when this threw,
+// the previous statement's table and pass banner stayed on screen under the new
+// statement's name, which is the most misleading thing this UI could do.
 const money = (v) =>
-  v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  typeof v === "number" && Number.isFinite(v)
+    ? v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    : "—";
 
 // The failsafe: do the commission amounts headed for Excel equal the total the
 // statement itself declares? Rendered above the table because a mismatch means
@@ -274,6 +294,19 @@ function renderTable(s) {
   const table = $("table");
   table.innerHTML = "";
 
+  // An image-only scan or an unrecognised layout yields no columns at all. Say so
+  // rather than leaving an empty <table>, which reads as "extracted nothing"
+  // indistinguishably from "still loading".
+  if (!s.columns.length) {
+    const tr = table.insertRow();
+    const td = tr.insertCell();
+    td.className = "table-empty";
+    td.textContent = s.warnings.length
+      ? "Nothing extracted — see “Needs review” above."
+      : "Nothing extracted from this file.";
+    return;
+  }
+
   const thead = table.createTHead();
   const hr = thead.insertRow();
   s.columns.forEach((col, i) => {
@@ -365,7 +398,7 @@ $("export-all").onclick = () => {
     );
     return;
   }
-  location.href = "/api/export.xlsx";
+  location.href = `/api/export.xlsx?ids=${workingSetIds()}`;
 };
 
 $("toggle-pdf").onclick = () => {
@@ -388,18 +421,42 @@ $("theme").onclick = () => {
   localStorage.setItem("theme", next);
 };
 
-document.documentElement.dataset.theme = localStorage.getItem("theme") || "dark";
+// The ids currently in the sidebar. Exports are scoped to these: statements now
+// persist, so an unscoped "export all" would mean the entire history rather than
+// what the user is looking at.
+function workingSetIds() {
+  return state.statements.filter((s) => !s.pending).map((s) => s.id).join(",");
+}
 
-// Restore anything already parsed server-side (survives a page refresh).
-fetch("/api/statements")
-  .then((r) => r.json())
-  .then(async (items) => {
-    for (const it of items) {
-      const full = await fetch(`/api/statements/${it.id}`).then((r) => r.json());
-      state.statements.push(full);
-    }
-    if (state.statements.length) state.activeId = state.statements[0].id;
-    renderList();
-    renderViewer();
-  })
-  .catch(() => {});
+async function signOut() {
+  try {
+    await fetch("/api/logout", { method: "POST" });
+  } finally {
+    location.href = "/login";
+  }
+}
+
+// Boot: identify the user, then load the most recent statements. The list
+// endpoint returns summaries only, so payloads are fetched for the ones shown.
+async function boot() {
+  document.documentElement.dataset.theme = localStorage.getItem("theme") || "dark";
+
+  const meRes = await api("/api/me").catch(() => null);
+  if (!meRes) return;
+  state.user = await meRes.json();
+  $("whoami").textContent = state.user.display_name || state.user.email;
+
+  const res = await api("/api/statements?limit=25").catch(() => null);
+  if (!res) return;
+  const { items } = await res.json();
+  for (const it of items) {
+    const full = await api(`/api/statements/${it.id}`).then((r) => r.json());
+    state.statements.push(full);
+  }
+  if (state.statements.length) state.activeId = state.statements[0].id;
+  renderList();
+  renderViewer();
+}
+
+$("signout").onclick = signOut;
+boot();

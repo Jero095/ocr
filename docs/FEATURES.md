@@ -4,8 +4,9 @@ Every capability the app currently has. Status is **measured** — the figures
 here come from `scripts/carriers_report.py` and `scripts/failsafe_report.py`
 sweeping every file in `statements/`, not from intent.
 
-Current coverage: **46 carriers / 57 files** — 14 verified, 14 unverified,
-2 with no locatable table, 16 blocked on OCR.
+Current coverage: **46 carriers / 57 files** — 21 verified, 22 unverified,
+2 with no locatable table, 1 unreadable (`ISC 58.65.pdf` is a corrupt file, not a
+scan). OCR closed the image-only gap: it was 16 carriers, it is now none.
 
 ---
 
@@ -24,6 +25,23 @@ Current coverage: **46 carriers / 57 files** — 14 verified, 14 unverified,
   page 2).
 - **Wrapped multi-line headers.** A header split across five lines
   (Vertigo: `Policy` / `Effective` / `Date`) is reassembled into one column name.
+
+### Scanned statements (OCR)
+- **Image-only PDFs are read.** 16 carriers ship scans with no text layer. OCR
+  rasterises each such page at 300 DPI, recovers per-word bounding boxes, and
+  hands them to the same column engine the digital PDFs use — so templates, totals
+  detection, per-column checks and the failsafe all apply to a scan unchanged.
+- **Sideways scans are straightened.** Many are stored as a portrait page holding
+  landscape content. The rotation is chosen by which one yields the most confident
+  words, not by trusting Tesseract's orientation detector (which reported 13.83%
+  confidence on a page it read correctly).
+- **Every OCR read is labelled.** The warning panel reports DPI, rotation, word
+  count and mean confidence, so a figure read by OCR is never mistaken for one
+  read from a text layer.
+- **OCR misreads are caught, not exported.** OCR confuses digits, so the failsafe
+  is what makes this usable: 4 carriers currently extract figures that fail
+  reconciliation and are blocked from export.
+- Only pages *without* a text layer are OCR'd — digital PDFs are untouched.
 
 ### Delimited exports (CSV / TSV / TXT)
 - **Delimiter sniffing** across `,` `;` `\t` `|`, chosen by column-count
@@ -44,6 +62,19 @@ nothing.
 A `Template` declares only what is carrier-specific: header tokens, the row
 pattern, the canonical column mapping, and an optional `base × rate == result`
 check. Geometry is shared. Currently: Chris Leef, Vertigo.
+
+### Totals rows recognised by arithmetic, not keyword
+
+A table's closing totals row must never be counted as a transaction — it doubles
+the payout exactly. Rows saying "Total" are caught by keyword, but Grundy-Phly and
+FARMERS-ALLIANCE close with a producer subtotal labelled only by the agency's own
+code and name. Those are caught by **arithmetic**: the row is a total only if every
+figure it carries equals the column sum of the rows above, at least two columns
+agree, and it is sparser than the rows above it. No per-carrier pattern involved,
+and a carrier that labels its total normally is unaffected.
+
+The delimited path applies the same test, and requires the sparseness guard even
+for keyword matches — an insured named "Total Comfort Heating" must not be dropped.
 
 ### Self-validating auto-detection
 For unknown carriers, every plausible header band is tried and the one whose
@@ -116,7 +147,10 @@ against references sourced outside the table:
    received and section subtotals cannot produce a false pass.
 
 Verdicts: `match` · `mismatch` · `no_reference` · `no_amounts`. Current results:
-**PASS 13 · FAIL 2 · could not run 31** (per carrier).
+**PASS 17 · FAIL 5 · could not run 24** (per carrier). The one FAIL is
+`FARMERS-ALLIANCE 124.23.pdf`, whose filename transposes two digits of the
+124.03 the statement itself declares — a naming error the failsafe caught. The
+other four are OCR misreads on scans, also correctly blocked.
 
 Design constraints:
 - The commission column is identified from the canonical mapping **only** —
@@ -164,7 +198,30 @@ Clipboard API is unavailable (non-secure context).
 
 ---
 
-## 6. Interface
+## 6. Accounts and history
+
+### Sign-in
+- Email and password, hashed with stdlib `scrypt`. Sessions are server-side rows,
+  so signing out revokes immediately and survives a restart.
+- **Nothing is readable without signing in** — not the API, and not the UI itself.
+- Per-email lockout after 8 failed attempts for 15 minutes.
+- No self-service signup; accounts come from `scripts/adduser.py`.
+
+### History
+- Statements **persist across restarts** in SQLite, with the original file kept
+  so the side-by-side PDF view still works months later.
+- Shared across the team and **attributed** — each entry records who uploaded it
+  and when.
+- Searchable by filename or carrier, filterable by failsafe status and uploader.
+- Duplicate uploads are detected by file hash and surfaced, not silently stored
+  twice.
+- Uploads are capped at 40MB.
+
+### Export scoping
+"Export all" means the statements you are working on, not the entire history.
+Exports take explicit ids; with none given it falls back to your last 24 hours.
+
+## 7. Interface
 
 - Drag-and-drop or browse; multiple files at once.
 - Sidebar listing every loaded statement with a green/red status dot and row count.
@@ -180,7 +237,7 @@ Clipboard API is unavailable (non-secure context).
 
 ---
 
-## 7. Reporting
+## 8. Reporting
 
 - **`CARRIERS.md`** — generated registry of every carrier with status, failsafe
   verdict, exported vs declared amounts, row counts and how it was parsed.
@@ -192,8 +249,11 @@ Clipboard API is unavailable (non-secure context).
 
 ## Not implemented
 
-- **OCR.** 16 carriers are image-only scans and cannot be read at all. This is
-  the single largest coverage unlock.
-- **Persistence.** Statements live in memory; a restart clears them.
-- **Authentication.** There is none — do not expose the app publicly as-is.
+- **Reliable OCR on 4 carriers.** Burns & Wilcox, CNA, Flathead and TransAmerica
+  extract tables whose figures do not reconcile. Their scans carry fold lines;
+  fixing them needs image pre-processing or hand-written templates.
+- **`ISC 58.65.pdf`** reports 0 pages and cannot be opened at all — a corrupt
+  file that needs re-exporting from the carrier.
+
+- **Password reset by email.** An admin resets with `scripts/adduser.py passwd`.
 - **LLM fallback** for layouts the auto-detector cannot crack.

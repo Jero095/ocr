@@ -295,6 +295,16 @@ body {
 
 .hint { font-size: 12px; margin: 8px 0 0; flex: none; }
 
+/* Shown in place of the table when a file yielded no columns (image-only scan,
+   unrecognised layout). Deliberately quiet - the reason lives in the warning
+   panel above; this only stops the pane looking blank or half-loaded. */
+.table-empty {
+  padding: 28px 16px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .pdf-pane iframe {
   width: 100%;
   flex: 1;
@@ -473,3 +483,75 @@ td.flash { background: color-mix(in srgb, var(--ok) 25%, transparent); }
 
 .cleanup .col { font-family: var(--mono); font-size: 12px; }
 .cleanup .why { color: var(--muted); }
+
+/* ---------- sign-in page ---------- */
+/* Uses the same tokens as the app so the two do not look like different products.
+   Centred card rather than a full-width form: it reads as a gate, not a page. */
+
+.login-body {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 360px;
+  padding: 28px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel, var(--bg));
+}
+
+.login-card .brand { margin-bottom: 6px; }
+.login-intro { font-size: 13px; margin: 0 0 20px; }
+.login-foot { font-size: 12px; margin: 18px 0 0; text-align: center; }
+
+.field { display: block; margin-bottom: 14px; }
+.field > span {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.field input {
+  width: 100%;
+  padding: 10px 12px;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.field input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.btn.primary {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.btn.block { width: 100%; justify-content: center; padding: 11px; }
+.btn:disabled { opacity: 0.6; cursor: default; }
+
+.login-error {
+  margin: 0 0 14px;
+  padding: 9px 11px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--bad);
+  border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent);
+  background: color-mix(in srgb, var(--bad) 10%, transparent);
+}
+
+/* Signed-in identity in the topbar, next to the theme toggle. */
+.whoami {
+  font-size: 12px;
+  color: var(--muted);
+  margin-right: 4px;
+  white-space: nowrap;
+}
