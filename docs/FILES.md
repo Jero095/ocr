@@ -8,11 +8,15 @@ CARRIERS.md                   generated per-carrier support registry
 requirements.txt              6 runtime deps + the Tesseract engine
 .gitignore                    excludes client data
 .claude/launch.json           dev-server config for the Browser pane
+Dockerfile                    container image; installs Tesseract explicitly
+.dockerignore                 keeps data/ and statements/ out of the image
+railway.json                  Railway builder, healthcheck, restart policy
 docs/
   FEATURES.md                 every capability
   STACK.md                    technology choices and rejected alternatives
   FILES.md                    this file
   TAILSCALE.md                serving and sharing over Tailscale (es)
+  DEPLOYMENT.md               architecture reference, Docker pipeline, Railway
 app/
   __init__.py                 marks app/ a package (empty)
   extract.py    1069 lines    PDF geometry engine, templates, failsafe, Statement

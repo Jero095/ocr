@@ -12,7 +12,8 @@ source PDFs are frequently unusable via copy/paste.
 Companion docs: [docs/FEATURES.md](docs/FEATURES.md) ·
 [docs/STACK.md](docs/STACK.md) · [docs/FILES.md](docs/FILES.md) ·
 [CARRIERS.md](CARRIERS.md) (per-carrier support status) ·
-[docs/TAILSCALE.md](docs/TAILSCALE.md) (how it is served and shared; in Spanish)
+[docs/TAILSCALE.md](docs/TAILSCALE.md) (how it is served and shared; in Spanish) ·
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) (architecture reference, Docker, Railway)
 
 ## Commands
 
@@ -210,7 +211,10 @@ Hand-written templates declare the mapping; auto-detected layouts have it
   date. Two-digit years stay text rather than guessing the century.
 - Statements are **persisted in SQLite** (`app/store.py`, `data/statements.db`),
   with the source file in `data/uploads/`. `data/` is gitignored — it holds the
-  same client PII as `statements/`, plus password hashes.
+  same client PII as `statements/`, plus password hashes. The location is set by
+  the `DATA_DIR` environment variable, defaulting to `<repo>/data`; it is a
+  variable specifically so a container's volume mount is deliberate and
+  checkable, because a wrong path does not raise — it starts empty.
 - Static assets are served `no-store` because a cached `index.html` against a
   fresh `app.js` silently breaks the UI.
 

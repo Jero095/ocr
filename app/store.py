@@ -34,13 +34,23 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 BASE_DIR = Path(__file__).parent.parent
-DATA_DIR = BASE_DIR / "data"
+
+# Where the database and uploaded source files live. Overridable by environment
+# so a container can point it at a mounted volume.
+#
+# This must be explicit rather than implied by the working directory. On a
+# platform with an ephemeral filesystem, a wrong path does not raise: the app
+# starts happily against an empty database, and the entire history and every
+# user account are gone with nothing in the logs to say so. Naming the variable
+# makes the mount point something you set on purpose and can verify.
+DATA_DIR = Path(os.environ.get("DATA_DIR") or BASE_DIR / "data")
 DB_PATH = DATA_DIR / "statements.db"
 
 # Uploads used to live in tempfile.gettempdir(), which Windows clears and which a
