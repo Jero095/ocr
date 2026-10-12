@@ -176,7 +176,52 @@ including direct API access.
 
 ---
 
-## 5. Export
+## 5. Editing the table before export
+
+The extracted table can be corrected in place before it leaves the app.
+
+- **Cell text** — click any cell and type. Enter commits, Escape cancels.
+- **Columns** — rename in place, reorder with `‹ ›`, delete with `×`.
+- **Rows** — delete individually.
+- **Restore original** — puts the table back exactly as it was extracted.
+
+Editing is an **explicit mode**, not always-on: click-to-copy is the app's
+primary gesture and an editable cell would swallow that click.
+
+### The failsafe verdict never moves
+
+This is the design decision that matters. The verdict answers *"did we extract
+correctly what the carrier sent?"* — a fact about the extraction, settled the
+moment the file was parsed. An edit afterwards can neither clear a real mismatch
+nor manufacture one.
+
+What an edit **can** do is move the table away from the figure the failsafe
+measured, and that is reported instead of hidden:
+
+- an `EDITED:` warning naming the new total and the exact difference,
+- the banner rewords itself from "Failsafe passed — **exports** 127.82" to
+  "Failsafe passed — **checked** 127.82 — now edited", with the current total
+  spelled out. The original wording would otherwise claim a figure the export no
+  longer carries,
+- an "edited by *name*" marker on the statement and a distinct dot in the
+  sidebar — deliberately not the red failure dot, because an edit is a
+  legitimate act, not a failure.
+
+### What is deliberately not editable
+
+The **totals row**. The per-column checks compare the rows against it, and it is
+the statement's own printed figure — editing it would turn the only internal
+reference into another thing that can be changed by accident.
+
+### The original is always recoverable
+
+`store.update_statement` writes the pre-edit payload to `original` once and never
+overwrites it, however many times the table is edited afterwards. This is
+financial data taken from a client document: what the carrier actually sent must
+stay recoverable, and an edited statement must never be indistinguishable from a
+pristine extraction.
+
+## 6. Export
 
 ### Excel (`.xlsx`)
 - One sheet per statement, faithful to that carrier's own columns.
@@ -202,7 +247,7 @@ Clipboard API is unavailable (non-secure context).
 
 ---
 
-## 6. Accounts and history
+## 7. Accounts and history
 
 ### Sign-in
 - Email and password, hashed with stdlib `scrypt`. Sessions are server-side rows,
@@ -225,7 +270,7 @@ Clipboard API is unavailable (non-secure context).
 "Export all" means the statements you are working on, not the entire history.
 Exports take explicit ids; with none given it falls back to your last 24 hours.
 
-## 7. Interface
+## 8. Interface
 
 - Drag-and-drop or browse; multiple files at once.
 - Sidebar listing every loaded statement with a green/red status dot and row count.
@@ -236,12 +281,13 @@ Exports take explicit ids; with none given it falls back to your last 24 hours.
 - **Cleanup panel** (delimited sources) listing each column touched and why.
 - **Needs-review panel** for warnings.
 - Side-by-side source PDF view.
+- Edit mode with per-column and per-row controls.
 - Dark/light theme, persisted.
 - Responsive down to a single column.
 
 ---
 
-## 8. Reporting
+## 9. Reporting
 
 - **`CARRIERS.md`** — generated registry of every carrier with status, failsafe
   verdict, exported vs declared amounts, row counts and how it was parsed.

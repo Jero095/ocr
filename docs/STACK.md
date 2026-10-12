@@ -19,6 +19,7 @@ contested and the alternatives are still reasonable.
 | OCR (scans) | pytesseract + Tesseract 5.4 | 0.3.13 |
 | Frontend | Plain HTML / CSS / JS | — |
 | Storage | SQLite (stdlib `sqlite3`), WAL | — |
+| Container | Docker (`python:3.12-slim` + Tesseract) | — |
 
 ```bash
 pip install -r requirements.txt
