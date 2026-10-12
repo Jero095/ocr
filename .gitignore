@@ -17,3 +17,5 @@ venv/
 # Persisted statements, uploaded source files and password hashes.
 # Same client data as statements/, so never committed.
 data/
+# Scratch databases from manual testing. Same shape as data/, same client PII.
+data_*/

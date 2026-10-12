@@ -21,7 +21,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, store
+from . import auth, extract, store
 from .excel import CANONICAL_FIELDS, build_workbook, canonical_map
 from .extract import parse_pdf
 from .tabular import parse_delimited
@@ -35,6 +35,10 @@ DELIMITED_SUFFIXES = (".csv", ".tsv", ".txt")
 # An upload is read into memory by the parser and rasterised page-by-page for OCR,
 # so an unbounded file is a trivial way to exhaust the box.
 MAX_UPLOAD_BYTES = 40 * 1024 * 1024
+
+# Prefix for the warning an edit raises. Used to find and replace a previous
+# edit warning rather than stacking one per save.
+EDIT_WARNING = "EDITED:"
 
 
 def _guard_failsafe(statements: list[dict]) -> None:
@@ -261,6 +265,111 @@ async def get_pdf(request: Request, sid: str):
         raise HTTPException(404, "Source file not found.")
     media = "application/pdf" if path.suffix.lower() == PDF_SUFFIX else "text/plain"
     return FileResponse(path, media_type=media)
+
+
+EDIT_TOL = 0.01  # cents; these are printed figures, not computed ones
+
+
+def _apply_edit(stmt: dict, columns: list[str], rows: list[dict]) -> dict:
+    """Rebuild a payload around user-edited columns and rows.
+
+    The failsafe verdict in `payout` is carried across untouched. It records
+    whether the *extraction* matched the statement the carrier sent, which an
+    edit cannot change after the fact - it must be able neither to clear a real
+    mismatch nor to invent one.
+
+    What an edit can do is move the table away from the figure the failsafe
+    measured, so that difference is reported as a warning instead. Warnings from
+    the original parse are kept; only a previous edit warning is replaced, so
+    editing twice does not stack duplicates.
+    """
+    payout = stmt.get("payout") or {}
+    extracted = payout.get("exported_total")
+
+    column, current = extract.commission_total(
+        stmt.get("template", ""), columns, rows
+    )
+
+    warnings = [w for w in stmt.get("warnings", []) if not w.startswith(EDIT_WARNING)]
+    if extracted is not None and current is None:
+        warnings.insert(
+            0,
+            f"{EDIT_WARNING} the {payout.get('commission_column') or 'commission'}"
+            f" column no longer holds any figures, so this export no longer"
+            f" carries the {extracted:,.2f} that was checked against the"
+            f" statement.",
+        )
+    elif (
+        extracted is not None
+        and current is not None
+        and abs(current - extracted) > EDIT_TOL
+    ):
+        warnings.insert(
+            0,
+            f"{EDIT_WARNING} {column} now adds up to {current:,.2f}, but"
+            f" {extracted:,.2f} was what the statement was checked against."
+            f" The difference is {current - extracted:+,.2f}.",
+        )
+
+    edited = {
+        **stmt,
+        "columns": columns,
+        "rows": rows,
+        "warnings": warnings,
+        "edited_total": current,
+    }
+    edited["tsv"] = _rebuild_tsv(edited)
+    return edited
+
+
+def _rebuild_tsv(stmt: dict) -> str:
+    """Regenerate the TSV after an edit.
+
+    `tsv` is computed once at upload and stored. Without this the clipboard and
+    the TSV export would keep serving the pre-edit table while the screen showed
+    the edited one - the kind of disagreement nobody notices until it is pasted
+    into a spreadsheet.
+    """
+    columns = stmt.get("columns", [])
+    lines = ["\t".join(columns)]
+    lines += ["\t".join(r.get(c, "") for c in columns) for r in stmt.get("rows", [])]
+    totals = stmt.get("totals") or {}
+    if totals:
+        lines.append("\t".join(totals.get(c, "") for c in columns))
+    return "\n".join(lines) + "\n"
+
+
+@app.patch("/api/statements/{sid}")
+async def edit_statement(request: Request, sid: str):
+    """Save a user-edited table. The failsafe verdict is preserved, not re-run."""
+    user = _me(request)
+    stmt = _load(sid)
+
+    body = await request.json()
+    columns = body.get("columns")
+    rows = body.get("rows")
+    if not isinstance(columns, list) or not isinstance(rows, list):
+        raise HTTPException(400, "Expected 'columns' and 'rows'.")
+    if not all(isinstance(c, str) for c in columns):
+        raise HTTPException(400, "Column names must be strings.")
+    if not all(isinstance(r, dict) for r in rows):
+        raise HTTPException(400, "Rows must be objects.")
+
+    edited = _apply_edit(stmt, columns, rows)
+    saved = store.update_statement(sid, edited, user["display_name"])
+    saved["edited"] = True
+    return saved
+
+
+@app.post("/api/statements/{sid}/revert")
+async def revert_statement(request: Request, sid: str):
+    """Restore the table exactly as it was first extracted."""
+    _me(request)
+    _load(sid)
+    payload = store.revert_statement(sid)
+    if payload is None:
+        raise HTTPException(409, "This statement has not been edited.")
+    return _load(sid)
 
 
 @app.delete("/api/statements/{sid}")

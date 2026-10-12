@@ -48,8 +48,18 @@
             <button id="copy-tsv" class="btn">Copy table</button>
             <button id="download-xlsx" class="btn">Excel</button>
             <button id="download" class="btn ghost">TSV</button>
+            <button id="edit-table" class="btn ghost">Edit table</button>
             <button id="toggle-pdf" class="btn ghost">Show PDF</button>
           </div>
+        </div>
+
+        <div id="editbar" class="editbar" hidden>
+          <span class="editbar-hint">
+            Click any cell to edit it. Use the column headers to rename, reorder
+            or remove columns.
+          </span>
+          <button id="revert-edits" class="btn ghost" hidden>Restore original</button>
+          <button id="save-edits" class="btn primary" disabled>Saved</button>
         </div>
 
         <div id="failsafe" class="failsafe" hidden></div>
@@ -61,7 +71,7 @@
             <div class="table-wrap">
               <table id="table"></table>
             </div>
-            <p class="hint muted">
+            <p id="table-hint" class="hint muted">
               Click any cell to copy it. Click a column header to copy the whole column.
             </p>
           </div>

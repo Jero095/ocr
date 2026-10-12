@@ -153,6 +153,8 @@ statement is one payload blob plus indexed columns for listing.
   per-IP because everyone arrives over the same Tailscale connection.
 - `save_statement` / `get_statement` / `list_statements` — the payload is the
   source of truth; the scalar columns are denormalised copies for filtering.
+- `update_statement()` / `revert_statement()` — save a user-edited payload,
+  preserving `original` and the failsafe verdict; restore it.
 - `recent_ids()` — the default export scope.
 - `duplicate_of()` — same file uploaded twice, by content hash. Surfaced, not
   blocked; history is shared so a second upload may be deliberate.

@@ -1001,23 +1001,42 @@ def declared_totals(page_lines) -> list[tuple[str, list[float]]]:
     return found
 
 
+def commission_total(
+    template: str, columns: list[str], rows: list[dict[str, str]]
+) -> tuple[str, float | None]:
+    """(commission column name, what it currently sums to).
+
+    The column is identified from the canonical mapping only - never by picking
+    whichever column happens to match a reference, which would make the failsafe
+    circular.
+
+    Shared with the edit path: after a user edits the table, this recomputes what
+    *would* now be exported, so the difference against the figure the failsafe
+    originally measured can be reported. The failsafe verdict itself is never
+    recomputed - see store.update_statement.
+    """
+    mapping = canonical_map(template, columns)
+    col = mapping.get("Commission Amount", "")
+    if not col or not rows:
+        return col, None
+    values = [to_float(r.get(col, "")) for r in rows]
+    values = [v for v in values if v is not None]
+    if not values:
+        return col, None
+    return col, round(sum(values), 2)
+
+
 def _payout_check(stmt: Statement, page_lines) -> PayoutCheck:
     check = PayoutCheck()
     check.filename_total = filename_amount(stmt.filename)
 
     candidates = declared_totals(page_lines)
 
-    # Sum the column that actually reaches Excel. The commission column is
-    # identified from the canonical mapping only - never by picking whichever
-    # column happens to match a reference, which would make the check circular.
-    mapping = canonical_map(stmt.template, stmt.columns)
-    col = mapping.get("Commission Amount", "")
-    if col and stmt.rows:
-        values = [to_float(r.get(col, "")) for r in stmt.rows]
-        values = [v for v in values if v is not None]
-        if values:
-            check.commission_column = col
-            check.exported_total = round(sum(values), 2)
+    # Sum the column that actually reaches Excel.
+    col, total = commission_total(stmt.template, stmt.columns, stmt.rows)
+    if total is not None:
+        check.commission_column = col
+        check.exported_total = total
 
     # Pick which figure on a multi-amount totals line is the commission one. If
     # any candidate agrees with the filename, that is the corroborating pair;

@@ -174,6 +174,17 @@ count unchanged. There is **no signup route**; accounts come from
 Tailscale this is real HTTPS and the flag must be set, but a Secure cookie is
 never returned over `http://localhost` and local development could not log in.
 
+**Editing never moves the failsafe verdict.** The table can be edited before
+export (`PATCH /api/statements/{id}`), but `payout` is carried across untouched.
+The verdict answers "did we extract correctly what the carrier sent?" - a fact
+about the extraction, settled when the file was parsed. An edit must be able
+neither to clear a real mismatch nor to manufacture one. What an edit *can* do is
+move the table away from the figure the failsafe measured, and that is reported
+as an `EDITED:` warning plus `edited_total`, with the banner reworded from
+"exports N" to "checked N - now edited" so it stops implying a figure it no
+longer governs. `store.update_statement` keeps the pre-edit payload in
+`original`, written once, so the carrier's own figures stay recoverable.
+
 **Export scoping matters more than it looks.** In memory, "export all" meant
 today's uploads. Once statements persist it would mean *every statement ever
 uploaded by anyone*, so exports take explicit `?ids=`, and the UI sends its

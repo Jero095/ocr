@@ -1,6 +1,6 @@
 const $ = (id) => document.getElementById(id);
 
-const state = { statements: [], activeId: null, user: null };
+const state = { statements: [], activeId: null, user: null, editing: null, dirty: false };
 
 // Every request goes through here so an expired session lands on the login page
 // instead of failing silently. The gate in app/auth.py answers /api/* with 401
@@ -99,6 +99,11 @@ function renderList() {
     if (s.pending) dot.className = "dot pending";
     else if (s.payout?.status === "mismatch") {
       dot.className = "dot bad";
+    } else if (s.edited) {
+      // Edited but not failed. Red would read as "this is wrong"; an edit is a
+      // deliberate act, it just means the table is no longer purely extracted.
+      dot.className = "dot edited";
+      dot.title = "Edited after extraction";
     } else {
       const ok = s.payout?.status === "match" || (s.checks?.length && s.checks.every((c) => c.ok));
       dot.className = "dot " + (ok && !s.warnings?.length ? "ok" : "bad");
@@ -152,9 +157,12 @@ function renderViewer() {
   if (!s) return;
 
   $("title").textContent = s.filename;
-  $("carrier").textContent = s.template
+  const edited = s.edited
+    ? ` · edited${s.edited_by ? ` by ${s.edited_by}` : ""}`
+    : "";
+  $("carrier").textContent = (s.template
     ? `${s.template} · ${s.rows.length} row${s.rows.length === 1 ? "" : "s"}`
-    : "Layout not recognised";
+    : "Layout not recognised") + edited;
 
   $("badges").innerHTML = "";
   for (const c of s.checks) {
@@ -179,6 +187,11 @@ function renderViewer() {
   }
 
   renderTable(s);
+  renderEditBar();
+  $("table-hint").textContent =
+    state.editing === s.id
+      ? "Click a cell to edit it. Changes are saved only when you press Save."
+      : "Click any cell to copy it. Click a column header to copy the whole column.";
   $("pdf").src = `/api/statements/${s.id}/pdf`;
 }
 
@@ -250,12 +263,31 @@ function renderFailsafe(s) {
     },
   }[p.status];
 
-  el.className = `failsafe ${view.cls}`;
+  // The verdict is a fact about the extraction and never changes once measured.
+  // But its wording says "exports N", and after an edit that figure is no longer
+  // what leaving the app would carry - so say so rather than let the banner
+  // imply a number it stopped governing.
+  const drifted =
+    typeof s.edited_total === "number" &&
+    typeof p.exported_total === "number" &&
+    Math.abs(s.edited_total - p.exported_total) > 0.01;
+
+  el.className = `failsafe ${view.cls}${drifted ? " drifted" : ""}`;
   el.innerHTML =
     `<span class="failsafe-icon">${view.icon}</span>` +
     `<span class="failsafe-body">` +
-    `<div class="failsafe-title">${view.title}</div>` +
-    `<div class="failsafe-detail">${view.detail}</div>` +
+    `<div class="failsafe-title">${
+      drifted
+        ? `${view.title.replace(/exports/, "checked")} — now edited`
+        : view.title
+    }</div>` +
+    `<div class="failsafe-detail">${view.detail}${
+      drifted
+        ? ` <b>Your edits changed the table: it now totals ${money(
+            s.edited_total,
+          )}, which is what an export would carry.</b>`
+        : ""
+    }</div>` +
     `</span>`;
 
   setExportEnabled(p.status !== "mismatch");
@@ -307,21 +339,64 @@ function renderTable(s) {
     return;
   }
 
+  const editing = state.editing === s.id;
+
   const thead = table.createTHead();
   const hr = thead.insertRow();
   s.columns.forEach((col, i) => {
     const th = document.createElement("th");
-    th.textContent = col;
-    th.title = `Copy the ${col} column`;
-    th.onclick = () => {
-      const vals = s.rows.map((r) => r[col] ?? "");
-      copy(vals.join("\n"), col);
+
+    if (!editing) {
+      th.textContent = col;
+      th.title = `Copy the ${col} column`;
+      th.onclick = () => {
+        const vals = s.rows.map((r) => r[col] ?? "");
+        copy(vals.join("\n"), col);
+      };
+      hr.append(th);
+      return;
+    }
+
+    // Editing: the header is renamed in place and carries its own controls.
+    const name = document.createElement("span");
+    name.className = "col-name";
+    name.contentEditable = "true";
+    name.spellcheck = false;
+    name.textContent = col;
+    name.onblur = () => renameColumn(i, name.textContent.trim() || col);
+    name.onkeydown = (e) => {
+      if (e.key === "Enter") { e.preventDefault(); name.blur(); }
+      if (e.key === "Escape") { name.textContent = col; name.blur(); }
     };
+
+    const tools = document.createElement("span");
+    tools.className = "col-tools";
+    const button = (label, title, fn, disabled) => {
+      const b = document.createElement("button");
+      b.textContent = label;
+      b.title = title;
+      b.disabled = !!disabled;
+      b.onclick = (e) => { e.stopPropagation(); fn(); };
+      return b;
+    };
+    tools.append(
+      button("‹", "Move left", () => moveColumn(i, -1), i === 0),
+      button("›", "Move right", () => moveColumn(i, 1), i === s.columns.length - 1),
+      button("×", `Delete the ${col} column`, () => deleteColumn(i)),
+    );
+
+    th.append(name, tools);
     hr.append(th);
   });
 
+  if (editing) {
+    const th = document.createElement("th");
+    th.className = "row-tools-head";
+    hr.append(th);
+  }
+
   const tbody = table.createTBody();
-  const addRow = (data, cls) => {
+  const addRow = (data, cls, rowIndex) => {
     const tr = tbody.insertRow();
     if (cls) tr.className = cls;
     for (const col of s.columns) {
@@ -332,7 +407,17 @@ function renderTable(s) {
         td.classList.add("num");
         if (isNegative(val)) td.classList.add("neg");
       }
-      if (val) {
+
+      if (editing && rowIndex !== undefined) {
+        td.contentEditable = "true";
+        td.spellcheck = false;
+        td.classList.add("editable");
+        td.onblur = () => editCell(rowIndex, col, td.textContent.trim());
+        td.onkeydown = (e) => {
+          if (e.key === "Enter") { e.preventDefault(); td.blur(); }
+          if (e.key === "Escape") { td.textContent = val; td.blur(); }
+        };
+      } else if (val && !editing) {
         td.onclick = async () => {
           if (await copy(val, col)) {
             td.classList.add("flash");
@@ -341,10 +426,164 @@ function renderTable(s) {
         };
       }
     }
+
+    if (editing) {
+      const td = tr.insertCell();
+      td.className = "row-tools";
+      if (rowIndex !== undefined) {
+        const b = document.createElement("button");
+        b.textContent = "×";
+        b.title = "Delete this row";
+        b.onclick = () => deleteRow(rowIndex);
+        td.append(b);
+      }
+    }
   };
 
-  s.rows.forEach((r) => addRow(r));
+  s.rows.forEach((r, i) => addRow(r, null, i));
+  // The totals row is rendered but never editable: it is the statement's own
+  // figure, and the per-column checks compare the rows against it. Letting it
+  // be typed over would turn the one internal reference into another thing the
+  // user can accidentally change.
   if (s.totals && Object.keys(s.totals).length) addRow(s.totals, "totals");
+}
+
+/* ---------- editing ---------- */
+
+// Edits mutate the loaded statement and are saved explicitly. The failsafe
+// verdict is never recomputed here or on the server - see _apply_edit in
+// app/main.py for why.
+
+function markDirty() {
+  state.dirty = true;
+  renderEditBar();
+}
+
+function editCell(rowIndex, col, value) {
+  const s = active();
+  if (!s || (s.rows[rowIndex]?.[col] ?? "") === value) return;
+  s.rows[rowIndex][col] = value;
+  markDirty();
+}
+
+function renameColumn(index, name) {
+  const s = active();
+  const old = s.columns[index];
+  if (!s || old === name || s.columns.includes(name)) return;
+  s.columns[index] = name;
+  for (const row of s.rows) {
+    row[name] = row[old] ?? "";
+    delete row[old];
+  }
+  if (s.totals && old in s.totals) {
+    s.totals[name] = s.totals[old];
+    delete s.totals[old];
+  }
+  markDirty();
+  renderTable(s);
+}
+
+function moveColumn(index, delta) {
+  const s = active();
+  const to = index + delta;
+  if (!s || to < 0 || to >= s.columns.length) return;
+  const [col] = s.columns.splice(index, 1);
+  s.columns.splice(to, 0, col);
+  markDirty();
+  renderTable(s);
+}
+
+function deleteColumn(index) {
+  const s = active();
+  if (!s) return;
+  // Deleting the commission column is allowed, but it is worth a confirmation:
+  // the export then carries no reconciled figure at all.
+  const col = s.columns[index];
+  if (col === s.payout?.commission_column &&
+      !confirm(`"${col}" is the column the failsafe checked. Delete it anyway?`)) {
+    return;
+  }
+  s.columns.splice(index, 1);
+  markDirty();
+  renderTable(s);
+}
+
+function deleteRow(index) {
+  const s = active();
+  if (!s) return;
+  s.rows.splice(index, 1);
+  markDirty();
+  renderTable(s);
+}
+
+function renderEditBar() {
+  const s = active();
+  const bar = $("editbar");
+  const editing = s && state.editing === s.id;
+  bar.hidden = !editing;
+  $("edit-table").textContent = editing ? "Done" : "Edit table";
+  if (!editing) return;
+  $("save-edits").disabled = !state.dirty;
+  $("save-edits").textContent = state.dirty ? "Save changes" : "Saved";
+  $("revert-edits").hidden = !s.edited;
+}
+
+async function saveEdits() {
+  const s = active();
+  if (!s) return;
+  $("save-edits").disabled = true;
+  $("save-edits").textContent = "Saving…";
+  try {
+    const res = await api(`/api/statements/${s.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ columns: s.columns, rows: s.rows }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      toast(data.detail || "Could not save");
+      renderEditBar();
+      return;
+    }
+    const saved = await res.json();
+    const i = state.statements.findIndex((v) => v.id === s.id);
+    state.statements[i] = saved;
+    state.dirty = false;
+    toast("Changes saved");
+    renderList();
+    renderViewer();
+  } catch {
+    toast("Save failed");
+    renderEditBar();
+  }
+}
+
+async function revertEdits() {
+  const s = active();
+  if (!s || !confirm("Discard all edits and restore the table as extracted?")) return;
+  const res = await api(`/api/statements/${s.id}/revert`, { method: "POST" });
+  if (!res.ok) { toast("Could not revert"); return; }
+  const restored = await res.json();
+  const i = state.statements.findIndex((v) => v.id === s.id);
+  state.statements[i] = restored;
+  state.dirty = false;
+  toast("Restored as extracted");
+  renderList();
+  renderViewer();
+}
+
+function toggleEdit() {
+  const s = active();
+  if (!s) return;
+  if (state.editing === s.id) {
+    if (state.dirty && !confirm("You have unsaved changes. Leave edit mode?")) return;
+    state.editing = null;
+    state.dirty = false;
+  } else {
+    state.editing = s.id;
+    state.dirty = false;
+  }
+  renderViewer();
 }
 
 /* ---------- wiring ---------- */
@@ -458,5 +697,8 @@ async function boot() {
   renderViewer();
 }
 
+$("edit-table").onclick = toggleEdit;
+$("save-edits").onclick = saveEdits;
+$("revert-edits").onclick = revertEdits;
 $("signout").onclick = signOut;
 boot();
