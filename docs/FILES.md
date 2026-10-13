@@ -19,18 +19,19 @@ docs/
   DEPLOYMENT.md               architecture reference, Docker pipeline, Railway
 app/
   __init__.py                 marks app/ a package (empty)
-  extract.py    1088 lines    PDF geometry engine, templates, failsafe, Statement
+  extract.py    1163 lines    PDF geometry engine, templates, failsafe, Statement
   ocr.py         226 lines    OCR for image-only scans -> word boxes in points
   tabular.py     383 lines    CSV/TSV loading and cleaning
-  store.py       637 lines    SQLite: statements, users, sessions, edits
+  store.py       669 lines    SQLite: statements, users, sessions, edits
   auth.py         96 lines    the gate: middleware, session cookies
   excel.py       247 lines    .xlsx workbook construction
-  main.py        459 lines    FastAPI routes, upload, editing, export guard
+  main.py        511 lines    FastAPI routes, upload, editing, export guard
   static/
-    app.js       704 lines    all frontend behaviour
-    style.css    621 lines    design tokens, dark/light, layout
-    index.html    89 lines    page skeleton
+    app.js       902 lines    all frontend behaviour
+    style.css    648 lines    design tokens, dark/light, layout
+    index.html    104 lines    page skeleton
     login.html    73 lines    sign-in page
+    vendor/                   pdf.js + worker, for the region selector
 scripts/
   carriers_report.py  194     sweeps statements/, regenerates CARRIERS.md
   failsafe_report.py   37     per-file payout reconciliation table

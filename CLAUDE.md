@@ -174,6 +174,20 @@ count unchanged. There is **no signup route**; accounts come from
 Tailscale this is real HTTPS and the flag must be set, but a Secure cookie is
 never returned over `http://localhost` and local development could not log in.
 
+**A region crops detection, never validation.** `parse_pdf(..., region=...)`
+takes a box as fractions of a page and drops words outside it before `_lines()`,
+so a table buried in letterhead can be isolated by hand
+(`POST /api/statements/{id}/reparse`). It builds **two** views of the pages:
+`table_pages` is cropped and feeds template matching and `_auto_detect`, while
+`pages` stays whole and feeds `_finalise`. That split is the safety property -
+`declared_totals` must keep scanning the entire page, or cropping to the table
+would throw away the labelled total the failsafe reconciles against, exactly
+when the user is steering the parse by hand. Verified: a crop that excludes the
+declared total still finds it. Fractions rather than points because the box is
+drawn in a browser at arbitrary zoom. A re-parse clears edits and `original` -
+it is a fresh extraction - but `store.replace_statement` keeps the uploader and
+the original upload time, because it is the same file read again.
+
 **Editing never moves the failsafe verdict.** The table can be edited before
 export (`PATCH /api/statements/{id}`), but `payout` is carried across untouched.
 The verdict answers "did we extract correctly what the carrier sent?" - a fact

@@ -455,6 +455,38 @@ def update_statement(sid: str, payload: dict, editor: str) -> dict:
     return payload
 
 
+def replace_statement(sid: str, payload: dict) -> dict:
+    """Swap in a freshly extracted payload, keeping who uploaded it and when.
+
+    Used by re-parse. Distinct from save_statement, which would need a user id
+    and would stamp a new upload time - a re-parse is the same upload read
+    again, not a new one, and the history must keep saying who actually sent it.
+
+    Edit markers are cleared: they described a table that no longer exists, and
+    `original` means "as extracted", which this now is.
+    """
+    payout = payload.get("payout") or {}
+    with connect() as conn:
+        if conn.execute(
+            "SELECT 1 FROM statements WHERE id = ?", (sid,)
+        ).fetchone() is None:
+            raise KeyError(sid)
+        conn.execute(
+            "UPDATE statements SET payload = ?, carrier = ?, row_count = ?,"
+            " failsafe = ?, exported_total = ?, original = NULL,"
+            " edited_by = NULL, edited_at = NULL WHERE id = ?",
+            (
+                json.dumps(payload),
+                payload.get("template", ""),
+                len(payload.get("rows") or []),
+                payout.get("status", ""),
+                payout.get("exported_total"),
+                sid,
+            ),
+        )
+    return payload
+
+
 def revert_statement(sid: str) -> dict | None:
     """Restore the payload as first extracted. Returns it, or None if unedited."""
     with connect() as conn:

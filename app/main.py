@@ -361,6 +361,58 @@ async def edit_statement(request: Request, sid: str):
     return saved
 
 
+@app.post("/api/statements/{sid}/reparse")
+async def reparse_statement(request: Request, sid: str):
+    """Re-extract from the stored source file, restricted to a drawn region.
+
+    A re-parse replaces the table wholesale, so it also clears any edits - the
+    rows they applied to no longer exist. `original` is reset with it, because
+    what it means is "the table as extracted", and this *is* a fresh extraction.
+    Send an empty body or `{"region": null}` to go back to reading the whole page.
+    """
+    _me(request)
+    stmt = _load(sid)
+
+    path = store.source_path(sid)
+    if path is None:
+        raise HTTPException(404, "The source file for this statement is gone.")
+    if path.suffix.lower() != PDF_SUFFIX:
+        raise HTTPException(400, "Region selection only applies to PDFs.")
+
+    body = await request.json() if await request.body() else {}
+    region = body.get("region")
+    if region is not None:
+        try:
+            region = {
+                "page": int(region["page"]),
+                **{k: float(region[k]) for k in ("x0", "y0", "x1", "y1")},
+            }
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, "A region needs page, x0, y0, x1 and y1.")
+        if region["page"] < 0 or not all(
+            0.0 <= region[k] <= 1.0 for k in ("x0", "y0", "x1", "y1")
+        ):
+            raise HTTPException(400, "Region coordinates must be fractions 0-1.")
+        if region["x1"] - region["x0"] < 0.01 or region["y1"] - region["y0"] < 0.01:
+            raise HTTPException(400, "That region is too small to read.")
+
+    try:
+        parsed = parse_pdf(str(path), stmt["filename"], region=region)
+    except Exception as exc:
+        raise HTTPException(422, f"Could not re-read that file: {exc}") from exc
+
+    payload = parsed.to_dict()
+    payload["tsv"] = parsed.to_tsv()
+    payload["id"] = sid
+
+    # A re-parse is a new extraction, so the edit markers that described the old
+    # table are cleared rather than carried onto rows they no longer match.
+    # replace_statement keeps the uploader and the original upload time: this is
+    # the same file read again, not a new submission.
+    store.replace_statement(sid, payload)
+    return _load(sid)
+
+
 @app.post("/api/statements/{sid}/revert")
 async def revert_statement(request: Request, sid: str):
     """Restore the table exactly as it was first extracted."""

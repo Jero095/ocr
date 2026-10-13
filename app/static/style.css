@@ -619,3 +619,30 @@ td.editable:focus {
    extraction really did reconcile) but mark the edge so it is not read as a
    claim about the current figures. */
 .failsafe.drifted { border-style: dashed; }
+
+/* ---------- PDF viewer with region selection ---------- */
+
+.pdf-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 0 8px;
+  font-size: 12px;
+}
+.pdf-canvas-wrap { position: relative; overflow: auto; flex: 1; }
+.pdf-canvas-wrap canvas { display: block; }
+
+.pdf-overlay { position: absolute; inset: 0; }
+.pdf-overlay.picking { cursor: crosshair; background: color-mix(in srgb, var(--accent) 6%, transparent); }
+
+.region { position: absolute; pointer-events: none; }
+.region.drawing {
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+/* The saved box stays visible so the crop currently in force is never a
+   guess - you can see exactly what the parser was allowed to read. */
+.region.saved {
+  border: 2px dashed var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}

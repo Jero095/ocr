@@ -188,11 +188,18 @@ function renderViewer() {
 
   renderTable(s);
   renderEditBar();
+  openPdfViewer(s).catch(() => {
+    // Falling back to the plain viewer is better than an empty pane: the user
+    // loses region selection, not the ability to look at the document.
+    $("pdf-canvas-wrap").hidden = true;
+    $("pdf").hidden = false;
+    $("pdf").src = `/api/statements/${s.id}/pdf`;
+    $("pick-region").hidden = true;
+  });
   $("table-hint").textContent =
     state.editing === s.id
       ? "Click a cell to edit it. Changes are saved only when you press Save."
       : "Click any cell to copy it. Click a column header to copy the whole column.";
-  $("pdf").src = `/api/statements/${s.id}/pdf`;
 }
 
 // Pinned to en-US: the statements are US-dollar documents and the table below
@@ -702,3 +709,194 @@ $("save-edits").onclick = saveEdits;
 $("revert-edits").onclick = revertEdits;
 $("signout").onclick = signOut;
 boot();
+
+/* ---------- PDF region selection ---------- */
+
+// Drawing a box over the page restricts *table detection* to what is inside it,
+// which is how a statement buried in letterhead and legal copy gets read. The
+// box is stored as fractions of the page, so it survives zoom, window size and
+// a restart. The server deliberately keeps validating against the whole page -
+// see parse_pdf, the crop must never narrow what checks the figures.
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = "/vendor/pdf.worker.min.js";
+
+const pdfView = { doc: null, page: 1, sid: null, viewport: null, picking: false, chain: null };
+
+async function openPdfViewer(s) {
+  const wrap = $("pdf-canvas-wrap");
+  const frame = $("pdf");
+
+  // Only PDFs can be drawn on; a CSV keeps the plain viewer.
+  if (!/\.pdf$/i.test(s.filename)) {
+    wrap.hidden = true;
+    frame.hidden = false;
+    frame.src = `/api/statements/${s.id}/pdf`;
+    $("pick-region").hidden = true;
+    $("clear-region").hidden = true;
+    $("pdf-pager").textContent = "";
+    return;
+  }
+
+  $("pick-region").hidden = false;
+  $("clear-region").hidden = !s.region;
+  frame.hidden = true;
+  frame.removeAttribute("src");
+  wrap.hidden = false;
+
+  if (pdfView.sid !== s.id) {
+    pdfView.sid = s.id;
+    pdfView.page = (s.region?.page ?? 0) + 1;
+    const res = await api(`/api/statements/${s.id}/pdf`);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    pdfView.doc = await pdfjsLib.getDocument({ data: bytes }).promise;
+  }
+  await renderPdfPage(s);
+}
+
+// Renders are serialised through one chain. Cancelling the in-flight task is
+// not enough on its own: several callers can read pdfView.task before any of
+// them assigns it, since the first await yields. pdf.js then refuses the second
+// render with "same canvas in use". A queue removes the race rather than
+// narrowing it.
+function renderPdfPage(s) {
+  pdfView.chain = (pdfView.chain || Promise.resolve())
+    .catch(() => {})
+    .then(() => drawPdfPage(s));
+  return pdfView.chain;
+}
+
+async function drawPdfPage(s) {
+  if (!pdfView.doc) return;
+  const page = await pdfView.doc.getPage(pdfView.page);
+  const canvas = $("pdf-canvas");
+  const wrap = $("pdf-canvas-wrap");
+
+  // Fit the width of the pane; the overlay is sized to match exactly so a box
+  // drawn on it converts to page fractions with no offset maths.
+  const scale = Math.max(0.2, (wrap.clientWidth - 2) / page.getViewport({ scale: 1 }).width);
+  const viewport = page.getViewport({ scale });
+  pdfView.viewport = viewport;
+
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  canvas.style.width = viewport.width + "px";
+  canvas.style.height = viewport.height + "px";
+  const overlay = $("pdf-overlay");
+  overlay.style.width = viewport.width + "px";
+  overlay.style.height = viewport.height + "px";
+
+  // renderViewer runs on every list/selection change, so renders overlap and
+  // pdf.js refuses a second one on a canvas already in use. Cancel the one in
+  // flight rather than let the newer call throw into the fallback path.
+  await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+
+  $("pdf-pager").textContent =
+    pdfView.doc.numPages > 1 ? `Page ${pdfView.page} of ${pdfView.doc.numPages}` : "";
+
+  overlay.innerHTML = "";
+  if (s.region && s.region.page === pdfView.page - 1) drawSavedRegion(s.region);
+}
+
+function drawSavedRegion(r) {
+  const box = document.createElement("div");
+  box.className = "region saved";
+  box.style.left = r.x0 * 100 + "%";
+  box.style.top = r.y0 * 100 + "%";
+  box.style.width = (r.x1 - r.x0) * 100 + "%";
+  box.style.height = (r.y1 - r.y0) * 100 + "%";
+  $("pdf-overlay").append(box);
+}
+
+function startRegionPick() {
+  const s = active();
+  if (!s || !pdfView.doc) return;
+  pdfView.picking = true;
+  $("pdf-overlay").classList.add("picking");
+  $("region-hint").hidden = false;
+  $("pick-region").textContent = "Cancel";
+}
+
+function stopRegionPick() {
+  pdfView.picking = false;
+  $("pdf-overlay").classList.remove("picking");
+  $("region-hint").hidden = true;
+  $("pick-region").textContent = "Select region";
+}
+
+// Fractions of the overlay, exactly as the sibling PDF tool does it: the same
+// box means the same thing at any zoom or screen size.
+$("pdf-overlay").addEventListener("pointerdown", (e) => {
+  if (!pdfView.picking) return;
+  e.preventDefault();
+  const overlay = $("pdf-overlay");
+  const rect = overlay.getBoundingClientRect();
+  const start = { x: e.clientX, y: e.clientY };
+  const box = document.createElement("div");
+  box.className = "region drawing";
+  overlay.append(box);
+
+  const move = (ev) => {
+    const x0 = Math.min(start.x, ev.clientX) - rect.left;
+    const y0 = Math.min(start.y, ev.clientY) - rect.top;
+    box.style.left = x0 + "px";
+    box.style.top = y0 + "px";
+    box.style.width = Math.abs(ev.clientX - start.x) + "px";
+    box.style.height = Math.abs(ev.clientY - start.y) + "px";
+  };
+
+  const up = async (ev) => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    box.remove();
+
+    const region = {
+      page: pdfView.page - 1,
+      x0: (Math.min(start.x, ev.clientX) - rect.left) / rect.width,
+      y0: (Math.min(start.y, ev.clientY) - rect.top) / rect.height,
+      x1: (Math.max(start.x, ev.clientX) - rect.left) / rect.width,
+      y1: (Math.max(start.y, ev.clientY) - rect.top) / rect.height,
+    };
+    for (const k of ["x0", "y0", "x1", "y1"]) {
+      region[k] = Math.min(1, Math.max(0, region[k]));
+    }
+    stopRegionPick();
+    if (region.x1 - region.x0 < 0.01 || region.y1 - region.y0 < 0.01) {
+      toast("That box is too small");
+      return;
+    }
+    await reparse(region);
+  };
+
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+});
+
+async function reparse(region) {
+  const s = active();
+  if (!s) return;
+  if (s.edited && !confirm("Re-reading replaces the table and discards your edits. Continue?")) {
+    return;
+  }
+  toast(region ? "Reading the selected region…" : "Reading the whole page…");
+  const res = await api(`/api/statements/${s.id}/reparse`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ region }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    toast(data.detail || "Could not re-read that file");
+    return;
+  }
+  const updated = await res.json();
+  const i = state.statements.findIndex((v) => v.id === s.id);
+  state.statements[i] = updated;
+  state.editing = null;
+  state.dirty = false;
+  toast(`${updated.rows.length} row${updated.rows.length === 1 ? "" : "s"} found`);
+  renderList();
+  renderViewer();
+}
+
+$("pick-region").onclick = () => (pdfView.picking ? stopRegionPick() : startRegionPick());
+$("clear-region").onclick = () => reparse(null);

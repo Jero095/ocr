@@ -221,7 +221,30 @@ financial data taken from a client document: what the carrier actually sent must
 stay recoverable, and an edited statement must never be indistinguishable from a
 pristine extraction.
 
-## 6. Export
+## 6. Reading only part of a page
+
+Some statements bury the table in letterhead, address blocks and legal copy, and
+the auto-detector occasionally locks onto the wrong one. **Select region** draws
+a box over the PDF and re-reads using only what is inside it.
+
+- The box is stored as **fractions of the page**, so it survives zoom, window
+  size, a different screen and a restart.
+- The saved box stays drawn over the page, so the crop in force is visible
+  rather than a guess.
+- **Read whole page** undoes it.
+
+### The crop never narrows the check
+
+Detection reads the cropped page; **validation still reads the whole one**. The
+failsafe reconciles against a labelled total in the statement text, and cropping
+to the table would throw that reference away at the exact moment the user is
+steering the parse by hand. Verified by cropping a statement so the declared
+total falls outside the box — it still reconciles.
+
+A re-parse is a fresh extraction, so it replaces the table and clears any edits,
+but keeps who uploaded the file and when.
+
+## 7. Export
 
 ### Excel (`.xlsx`)
 - One sheet per statement, faithful to that carrier's own columns.
@@ -247,7 +270,7 @@ Clipboard API is unavailable (non-secure context).
 
 ---
 
-## 7. Accounts and history
+## 8. Accounts and history
 
 ### Sign-in
 - Email and password, hashed with stdlib `scrypt`. Sessions are server-side rows,
@@ -270,7 +293,7 @@ Clipboard API is unavailable (non-secure context).
 "Export all" means the statements you are working on, not the entire history.
 Exports take explicit ids; with none given it falls back to your last 24 hours.
 
-## 8. Interface
+## 9. Interface
 
 - Drag-and-drop or browse; multiple files at once.
 - Sidebar listing every loaded statement with a green/red status dot and row count.
@@ -282,12 +305,13 @@ Exports take explicit ids; with none given it falls back to your last 24 hours.
 - **Needs-review panel** for warnings.
 - Side-by-side source PDF view.
 - Edit mode with per-column and per-row controls.
+- PDF viewer with drag-to-select region (pdf.js, vendored).
 - Dark/light theme, persisted.
 - Responsive down to a single column.
 
 ---
 
-## 9. Reporting
+## 10. Reporting
 
 - **`CARRIERS.md`** — generated registry of every carrier with status, failsafe
   verdict, exported vs declared amounts, row counts and how it was parsed.

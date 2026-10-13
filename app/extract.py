@@ -221,6 +221,9 @@ class Statement:
     # file was split. Empty for PDFs.
     cleanup: list[dict] = field(default_factory=list)
     delimiter: str = ""
+    # The box the user drew to restrict table detection, as fractions of a page.
+    # Stored so it survives a restart and can be shown again over the PDF.
+    region: dict | None = None
 
     @property
     def canonical(self) -> dict[str, str]:
@@ -242,6 +245,7 @@ class Statement:
             "payout": self.payout.to_dict() if self.payout else None,
             "cleanup": self.cleanup,
             "delimiter": self.delimiter,
+            "region": self.region,
         }
 
     def to_tsv(self) -> str:
@@ -462,17 +466,61 @@ def _cells(line: list[dict], names, extents, rotated: bool) -> dict[str, str]:
 
 # --- parsing -----------------------------------------------------------------
 
-def parse_pdf(path: str, filename: str) -> Statement:
+def _crop(
+    words: list[dict], region: dict, extent: tuple[float, float], rotated: bool
+) -> list[dict]:
+    """Keep only the words inside a region given as fractions of the page.
+
+    Fractions rather than points because the box is drawn in the browser, where
+    the page is rendered at whatever zoom fits the pane. A fraction means the
+    same thing at any zoom, on any screen, and still means it after a restart.
+
+    On a 180-degree page the viewer shows the page the right way up while
+    pdfplumber reports coordinates in the unrotated space, so the box has to be
+    flipped to land on what the user actually pointed at.
+    """
+    width, height = extent
+    x0, y0, x1, y1 = region["x0"], region["y0"], region["x1"], region["y1"]
+    if rotated:
+        x0, x1 = 1.0 - x1, 1.0 - x0
+        y0, y1 = 1.0 - y1, 1.0 - y0
+
+    left, right = x0 * width, x1 * width
+    top, bottom = y0 * height, y1 * height
+
+    # Overlap, not containment: a word straddling the edge of the box is one the
+    # user meant to include, and demanding full containment would silently clip
+    # the first or last column of whatever they drew around.
+    return [
+        w
+        for w in words
+        if w["x1"] > left and w["x0"] < right
+        and w["bottom"] > top and w["top"] < bottom
+    ]
+
+
+def parse_pdf(path: str, filename: str, region: dict | None = None) -> Statement:
+    """Extract a statement. `region` restricts *table detection* to a box.
+
+    The region narrows what the table engine sees. It deliberately does **not**
+    narrow what validates it: `_finalise` still runs over the whole page, so the
+    declared total the failsafe reconciles against survives a crop. Losing that
+    reference at the exact moment the user is steering the parse by hand would
+    be the worst possible time to lose it.
+    """
     stmt = Statement(filename=filename)
 
     # Rotation is per page: a statement can mix a rotated table page with an
     # unrotated cover or address page, so each page is grouped independently.
     pages: list[tuple[list[list[dict]], bool]] = []
+    table_pages: list[tuple[list[list[dict]], bool]] = []
     ocr_notes: list[str] = []
+    cropped_from = 0
     with pdfplumber.open(path) as pdf:
-        for page in pdf.pages:
+        for index, page in enumerate(pdf.pages):
             rotated = (page.rotation or 0) % 360 == 180
             words = page.extract_words()
+            extent = (float(page.width), float(page.height))
             if not words:
                 # No text layer on this page - an image-only scan. OCR returns the
                 # same word dicts in PDF points, already turned visually upright,
@@ -482,11 +530,38 @@ def parse_pdf(path: str, filename: str) -> Statement:
                     ocr_notes.append(f"Page {page.page_number}: {note}")
                 if words:
                     rotated = False
+                    # OCR straightens the page, so its coordinate space is the
+                    # upright one, which swaps width and height on a sideways
+                    # scan. Measure it from the words rather than assume.
+                    extent = (
+                        max(w["x1"] for w in words),
+                        max(w["bottom"] for w in words),
+                    )
+
             pages.append((_lines(words, rotated), rotated))
+
+            if region and region.get("page", 0) == index:
+                kept = _crop(words, region, extent, rotated)
+                cropped_from = len(words)
+                table_pages.append((_lines(kept, rotated), rotated))
+            elif region:
+                # A region names one page; the others contribute no table.
+                table_pages.append(([], rotated))
+            else:
+                table_pages.append((_lines(words, rotated), rotated))
+
     stmt.warnings.extend(ocr_notes)
+    if region:
+        kept = sum(len(line) for lines, _ in table_pages for line in lines)
+        stmt.region = region
+        stmt.warnings.append(
+            f"Reading only the selected region of page {region.get('page', 0) + 1}"
+            f" - {kept} of {cropped_from} words on that page. The failsafe still"
+            f" checks against the whole statement."
+        )
 
     found = None
-    for lines, rotated in pages:
+    for lines, rotated in table_pages:
         for band in _bands(lines, rotated):
             tokens = {_text(w, rotated).lower().strip(":*") for w in band}
             for template in TEMPLATES:
@@ -508,7 +583,7 @@ def parse_pdf(path: str, filename: str) -> Statement:
             _finalise(stmt, pages)
             return stmt
 
-        auto = _auto_detect(pages)
+        auto = _auto_detect(table_pages)
         if auto is None:
             stmt.warnings.append(
                 "Has a text layer but no table could be located. Needs a "
@@ -575,7 +650,7 @@ def parse_pdf(path: str, filename: str) -> Statement:
         # A template's header tokens can appear in an unrelated carrier's header
         # (Amwins' header contains all of Chris Leef's tokens). A match that
         # yields no rows is a false positive, so fall through to auto-detection.
-        auto = _auto_detect(pages)
+        auto = _auto_detect(table_pages)
         if auto is not None:
             names, rows, totals, subs, checks = auto
             stmt.template = f"{carrier_from_filename(filename)} (auto-detected)"
