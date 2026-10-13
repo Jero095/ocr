@@ -9,7 +9,8 @@ PDFs and CSV/TSV exports, validates the figures against the statement's own
 declared totals, and exports to Excel/TSV. Built for copying values out — the
 source PDFs are frequently unusable via copy/paste.
 
-Companion docs: [docs/FEATURES.md](docs/FEATURES.md) ·
+Companion docs: [README.md](README.md) (human-facing overview) ·
+[docs/FEATURES.md](docs/FEATURES.md) ·
 [docs/STACK.md](docs/STACK.md) · [docs/FILES.md](docs/FILES.md) ·
 [CARRIERS.md](CARRIERS.md) (per-carrier support status) ·
 [docs/TAILSCALE.md](docs/TAILSCALE.md) (how it is served and shared; in Spanish) ·

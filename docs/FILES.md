@@ -3,6 +3,7 @@
 What each file is responsible for, and the load-bearing pieces inside it.
 
 ```
+README.md                     human-facing overview and quick start
 CLAUDE.md                     guidance for Claude Code
 CARRIERS.md                   generated per-carrier support registry
 requirements.txt              6 runtime deps + the Tesseract engine
