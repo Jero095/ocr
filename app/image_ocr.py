@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import os
 
 from PIL import Image, ImageOps
@@ -146,24 +147,20 @@ def _encode_for_claude(image: Image.Image) -> tuple[str, str]:
     raise OCRError("That image is too large to send, even after compression.")
 
 
-def _claude(image: Image.Image, language: str) -> dict:
+def _call_claude(image: Image.Image, system: str, instruction: str, **extra):
+    """One vision request. Every failure comes back as an OCRError for the UI."""
     ok, reason = _claude_available()
     if not ok:
         raise OCRError(reason)
     import anthropic
 
     data, media_type = _encode_for_claude(image)
-    label = LANGUAGES[language][0]
-    instruction = ("Transcribe all the text in this image."
-                   if language == "auto"
-                   else f"Transcribe all the text in this image. It is written in {label}.")
-
     client = anthropic.Anthropic()
     try:
         response = client.beta.messages.create(
             model=CLAUDE_MODEL,
             max_tokens=16000,
-            system=SYSTEM_PROMPT,
+            system=system,
             # If a safety classifier declines, the API retries on a fallback
             # model within the same call instead of returning nothing.
             betas=["server-side-fallback-2026-07-01"],
@@ -176,6 +173,7 @@ def _claude(image: Image.Image, language: str) -> dict:
                     {"type": "text", "text": instruction},
                 ],
             }],
+            **extra,
         )
     except anthropic.AuthenticationError as exc:
         raise OCRError("The Anthropic API key was rejected.") from exc
@@ -189,12 +187,99 @@ def _claude(image: Image.Image, language: str) -> dict:
         raise OCRError("Could not reach the Anthropic API.") from exc
 
     if response.stop_reason == "refusal":
-        raise OCRError("The model declined to transcribe this image.")
-    text = "".join(b.text for b in response.content if b.type == "text").strip()
+        raise OCRError("The model declined to read this image.")
+    return response
+
+
+def _text_of(response) -> str:
+    return "".join(b.text for b in response.content if b.type == "text").strip()
+
+
+def _claude(image: Image.Image, language: str) -> dict:
+    label = LANGUAGES[language][0]
+    instruction = ("Transcribe all the text in this image."
+                   if language == "auto"
+                   else f"Transcribe all the text in this image. It is written in {label}.")
+    response = _call_claude(image, SYSTEM_PROMPT, instruction)
     note = f"Read by {response.model}"
     if response.stop_reason == "max_tokens":
         note += " - output was cut off at the length limit"
-    return {"text": text, "engine": "claude", "note": note + "."}
+    return {"text": _text_of(response), "engine": "claude", "note": note + "."}
+
+
+# --- deposit slips -----------------------------------------------------------
+#
+# Claude only *reads* the slip. Whether the figures add up is decided by the app
+# (app/static/slips.js), from the figures as read. The prompt therefore forbids
+# adjusting a figure to make the totals agree: a model that "fixes" a misread
+# digit to match the subtotal would make the arithmetic check circular and turn
+# every misread into a false pass. Same rule as the statement failsafe.
+#
+# Amounts come back as strings, not numbers, so no float rounding happens before
+# the check, and an empty string means the line was blank.
+
+SLIP_SYSTEM_PROMPT = """You read handwritten bank deposit slips and report what is written on them.
+
+Where each field is on the slip:
+- `date`: the handwritten date beside the printed word DATE, center left. Always present. Report it as written (e.g. 6/22/2026).
+- `office`: the handwritten name just below the date (e.g. Walker).
+- `cash`: the figure written beside the printed word CASH, at the top center of the slip. Often there is none. Set `cash_present` to false and `cash` to "" when nothing is written there; never put a payment figure in `cash`.
+- `payments`: every handwritten amount in the columns of rows beside the small rectangle marks, in reading order: down the first column, then down the next. `check_number` is the number written inside or on that rectangle, or "" when it is blank. Do not include the cash figure or either total.
+- `check_total`: sometimes written at the bottom right, beside the printed word SUBTOTAL: the sum of all the payments, without cash. "" if absent.
+- `net_total`: sometimes written at the very bottom right, beside TOTAL: the deposit total, payments plus cash. "" if absent. The small printed TOTAL ITEMS box is a count, not an amount; ignore it.
+
+Rules:
+- Report every figure exactly as it is written. Never change a figure so that the totals agree: the arithmetic is checked separately, and an adjusted figure would hide a misreading.
+- If a digit is ambiguous, give the most likely reading and describe the doubt in `uncertain` (e.g. "2,842.60 - the .60 may be superscript .00").
+- Amounts: digits and one decimal point only, always two decimals, no $ sign and no thousands separators ("2,222.00" becomes "2222.00"). Raised or superscript cents are still cents."""
+
+SLIP_INSTRUCTION = "Read this deposit slip."
+
+_STR = {"type": "string"}
+SLIP_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "date": _STR,
+        "office": _STR,
+        "cash_present": {"type": "boolean"},
+        "cash": _STR,
+        "payments": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"check_number": _STR, "amount": _STR},
+                "required": ["check_number", "amount"],
+                "additionalProperties": False,
+            },
+        },
+        "check_total": _STR,
+        "net_total": _STR,
+        "uncertain": {"type": "array", "items": _STR},
+    },
+    "required": ["date", "office", "cash_present", "cash", "payments",
+                 "check_total", "net_total", "uncertain"],
+    "additionalProperties": False,
+}
+
+
+def deposit_slip(data: bytes) -> dict:
+    image = _open(data)
+    response = _call_claude(
+        image, SLIP_SYSTEM_PROMPT, SLIP_INSTRUCTION,
+        # Handwritten digits are the whole job here; spend the extra thinking.
+        output_config={
+            "effort": "high",
+            "format": {"type": "json_schema", "schema": SLIP_SCHEMA},
+        },
+    )
+    if response.stop_reason == "max_tokens":
+        raise OCRError("The slip reading was cut off before it finished.")
+    try:
+        slip = json.loads(_text_of(response))
+    except ValueError as exc:
+        raise OCRError("The model returned an unreadable answer. Try again.") from exc
+    slip["model"] = response.model
+    return slip
 
 
 # --- Tesseract ---------------------------------------------------------------

@@ -145,6 +145,27 @@ Two engines, chosen per request with a language hint:
   packs beyond `eng` must be installed. A missing pack raises an error rather
   than silently reading as English.
 
+### Deposit slips (`#slips`, `app/static/slips.js`)
+
+Claude reads each slip into the fields the business uses (`deposit_slip()`,
+JSON-schema structured output). They are listed with their position on the
+slip in `SLIP_SYSTEM_PROMPT`: date, office, cash (explicitly present or absent),
+every payment, and the two optional totals.
+
+The arithmetic check lives in `slips.js` and runs again on every edit. The two
+totals cross-validate independently: **check total** = payments, **net total** =
+payments + cash. So a misread cash figure fails only the net total, and a misread
+payment fails both. A slip with neither total is "unverified" and goes into the
+CSV only after someone confirms it by hand; any edit withdraws that confirmation.
+The CSV's `Verified` column records which route each slip took. Export is blocked
+until every slip is cross-checked or confirmed.
+
+**The prompt forbids adjusting a figure to make the totals agree.** If the model
+were allowed to "fix" a digit so it matches the subtotal, the check would become
+circular and every misread would turn into a false pass. The first real slip
+showed why: `2,842.⁰⁰` reads naturally as `2,842.60`, and only the subtotal gives
+it away. Amounts are strings and the check uses integer cents.
+
 ### Two ways a layout is recognised
 
 - `TEMPLATES` — hand-written entries (currently Chris Leef, Vertigo). Header

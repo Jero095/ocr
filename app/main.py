@@ -458,6 +458,16 @@ IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".ti
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
 
+def _read_image(file: UploadFile) -> bytes:
+    if not (file.filename or "").lower().endswith(IMAGE_SUFFIXES):
+        raise HTTPException(400, "Upload a PNG, JPG, WEBP, GIF, BMP or TIFF image.")
+    data = file.file.read(MAX_IMAGE_BYTES + 1)
+    if len(data) > MAX_IMAGE_BYTES:
+        raise HTTPException(413, f"That image is larger than "
+                                 f"{MAX_IMAGE_BYTES // (1024 * 1024)}MB.")
+    return data
+
+
 @app.get("/api/ocr/options")
 def ocr_options():
     return {"engines": image_ocr.engines(), "languages": image_ocr.languages()}
@@ -469,14 +479,20 @@ def ocr_image(
     engine: str = Form("claude"),
     language: str = Form("auto"),
 ):
-    if not (file.filename or "").lower().endswith(IMAGE_SUFFIXES):
-        raise HTTPException(400, "Upload a PNG, JPG, WEBP, GIF, BMP or TIFF image.")
-    data = file.file.read(MAX_IMAGE_BYTES + 1)
-    if len(data) > MAX_IMAGE_BYTES:
-        raise HTTPException(413, f"That image is larger than "
-                                 f"{MAX_IMAGE_BYTES // (1024 * 1024)}MB.")
+    data = _read_image(file)
     try:
         return image_ocr.transcribe(data, engine, language)
+    except image_ocr.OCRError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/ocr/deposit-slip")
+def ocr_deposit_slip(file: UploadFile = File(...)):
+    """Read a deposit slip into fields. The arithmetic check is done by the UI,
+    against the figures as read - see the note above SLIP_SYSTEM_PROMPT."""
+    data = _read_image(file)
+    try:
+        return image_ocr.deposit_slip(data)
     except image_ocr.OCRError as exc:
         raise HTTPException(422, str(exc)) from exc
 

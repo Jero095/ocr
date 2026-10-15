@@ -905,15 +905,17 @@ $("clear-region").onclick = () => reparse(null);
 
 // Hash routing keeps it one page: the statement viewer keeps its state while the
 // OCR view is open, and a reload lands back on the same section.
+const VIEWS = ["statements", "ocr", "slips"];
+
 function showView() {
-  const view = location.hash === "#ocr" ? "ocr" : "statements";
-  $("statements-view").hidden = view !== "statements";
-  $("ocr-view").hidden = view !== "ocr";
+  const wanted = location.hash.slice(1);
+  const view = VIEWS.includes(wanted) ? wanted : "statements";
+  for (const v of VIEWS) $(`${v}-view`).hidden = v !== view;
   $("export-all").style.visibility = view === "statements" ? "" : "hidden";
   document.querySelectorAll(".nav-link").forEach((a) =>
     a.classList.toggle("active", a.dataset.view === view)
   );
-  if (view === "ocr") loadOcrOptions();
+  if (view === "ocr" || view === "slips") loadOcrOptions();
 }
 window.addEventListener("hashchange", showView);
 
@@ -952,6 +954,7 @@ async function loadOcrOptions() {
   eng.value = (saved || first || ocr.options.engines[0]).id;
   renderEngineNote();
   updateOcrButtons();
+  document.dispatchEvent(new Event("ocr-options"));
 }
 
 function renderEngineNote() {
@@ -1043,9 +1046,11 @@ $("ocr-engine").onchange = (e) => {
   remember("ocr-engine", e.target.value);
   renderEngineNote();
   updateOcrButtons();
+  document.dispatchEvent(new Event("ocr-options"));
 };
 $("ocr-run").onclick = runOcr;
 $("ocr-text").oninput = updateOcrButtons;
 $("ocr-copy").onclick = () => copy($("ocr-text").value, "Text");
 
-showView();
+// Deferred so slips.js, which loads after this file, is in place first.
+window.addEventListener("DOMContentLoaded", showView);

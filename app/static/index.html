@@ -15,6 +15,7 @@
     <nav class="nav" aria-label="Sections">
       <a href="#statements" data-view="statements" class="nav-link">Statements</a>
       <a href="#ocr" data-view="ocr" class="nav-link">Simple OCR</a>
+      <a href="#slips" data-view="slips" class="nav-link">Deposit Slips</a>
     </nav>
     <div class="topbar-actions">
       <button id="export-all" class="btn" hidden>Export all to Excel</button>
@@ -139,8 +140,31 @@
     </section>
   </main>
 
+  <!-- Deposit slips: Claude reads each slip, the page checks the arithmetic,
+       and CSV export stays blocked until every slip reconciles. -->
+  <main class="slips-view" id="slips-view" hidden>
+    <div class="slips-head">
+      <label for="slip-file" id="slip-drop" class="drop slip-drop" tabindex="0">
+        <span class="drop-icon">↥</span>
+        <strong>Drop deposit slips</strong>
+        <span class="muted">One image per slip - several at once is fine</span>
+        <input id="slip-file" type="file" accept="image/*" multiple hidden />
+      </label>
+      <div class="slips-actions">
+        <div id="slip-summary" class="muted"></div>
+        <div class="slips-buttons">
+          <button id="slip-clear" class="btn ghost" hidden>Clear all</button>
+          <button id="slip-csv" class="btn primary" disabled>Download CSV</button>
+        </div>
+        <p id="slip-engine-note" class="hint muted"></p>
+      </div>
+    </div>
+    <div id="slip-list" class="slip-list"></div>
+  </main>
+
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/vendor/pdf.min.js"></script>
   <script src="/app.js"></script>
+  <script src="/slips.js"></script>
 </body>
 </html>

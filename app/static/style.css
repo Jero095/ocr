@@ -664,7 +664,7 @@ td.editable:focus {
 .nav-link.active { color: var(--text); background: var(--accent-soft); }
 
 /* .layout sets display:grid, which beats the UA [hidden] rule. */
-.layout[hidden], .ocr-view[hidden] { display: none; }
+.layout[hidden], .ocr-view[hidden], .slips-view[hidden] { display: none; }
 
 /* ---------- simple OCR ---------- */
 
@@ -742,4 +742,123 @@ td.editable:focus {
 @media (max-width: 900px) {
   .ocr-view { grid-template-columns: 1fr; padding: 16px; }
   .nav { margin-left: 0; }
+}
+
+/* ---------- deposit slips ---------- */
+
+.slips-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 24px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.slips-head {
+  display: grid;
+  grid-template-columns: minmax(260px, 420px) 1fr;
+  gap: 20px;
+  align-items: stretch;
+}
+
+.slip-drop { justify-content: center; }
+.slip-drop.disabled { opacity: .5; }
+
+.slips-actions { display: flex; flex-direction: column; justify-content: center; gap: 8px; }
+.slips-buttons { display: flex; gap: 8px; }
+
+.slip-list { display: flex; flex-direction: column; gap: 16px; }
+
+.slip-card {
+  display: grid;
+  grid-template-columns: minmax(280px, 1.1fr) minmax(320px, 1fr);
+  gap: 18px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+/* Stays in view while scrolling the figures, so each one can be compared. */
+.slip-image { align-self: start; position: sticky; top: 0; }
+
+.slip-image img {
+  width: 100%;
+  border-radius: 6px;
+  background: #fff;
+  display: block;
+}
+
+.slip-detail { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+.slip-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  word-break: break-all;
+}
+
+.slip-body { display: flex; flex-direction: column; gap: 14px; }
+
+.slip-verdict {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid;
+  font-size: 13px;
+}
+
+.slip-verdict.ok { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+.slip-verdict.bad { border-color: var(--bad); background: color-mix(in srgb, var(--bad) 10%, transparent); }
+.slip-verdict.unverified { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); }
+.slip-confirm { display: flex; align-items: center; gap: 6px; margin-top: 8px; cursor: pointer; }
+.slip-cash-label { display: flex; align-items: center; gap: 4px; }
+.slip-field .slip-cash-label input, .slip-confirm input { width: auto; margin: 0; }
+.slip-field input:disabled { color: var(--muted); }
+.slip-verdict ul, .slip-uncertain ul { margin: 6px 0 0; padding-left: 18px; }
+.slip-verdict p { margin: 6px 0 10px; }
+.slip-verdict li.bad { color: var(--bad); }
+.slip-verdict li.info { color: var(--muted); }
+
+.slip-uncertain {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--warn);
+  font-size: 13px;
+}
+
+.slip-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 10px;
+}
+
+.slip-field { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.slip-field.wide { grid-column: span 2; }
+
+.slip-field input, .slip-items input {
+  width: 100%;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 6px 8px;
+  border-radius: 6px;
+  font: 13px var(--mono);
+}
+
+.slip-field input:focus, .slip-items input:focus { outline: none; border-color: var(--accent); }
+input.num { text-align: right; }
+
+.slip-items { width: 100%; border-collapse: collapse; margin-bottom: 8px; font-size: 13px; }
+.slip-items th { text-align: left; font-weight: 500; color: var(--muted); padding: 4px; font-size: 12px; }
+.slip-items td { padding: 3px 4px; }
+.slip-items td:first-child { width: 28px; }
+.slip-items td:last-child { width: 40px; }
+
+@media (max-width: 900px) {
+  .slips-view { padding: 16px; }
+  .slips-head, .slip-card { grid-template-columns: 1fr; }
+  .slip-image { position: static; }
 }
