@@ -12,6 +12,11 @@
       <span class="mark"></span>
       <h1>Statement Reader</h1>
     </div>
+    <nav class="nav" aria-label="Sections">
+      <a href="#statements" data-view="statements" class="nav-link">Statements</a>
+      <a href="#ocr" data-view="ocr" class="nav-link">Simple OCR</a>
+      <a href="#slips" data-view="slips" class="nav-link">Deposit Slips</a>
+    </nav>
     <div class="topbar-actions">
       <button id="export-all" class="btn" hidden>Export all to Excel</button>
       <span id="whoami" class="whoami"></span>
@@ -20,7 +25,7 @@
     </div>
   </header>
 
-  <main class="layout">
+  <main class="layout" id="statements-view">
     <aside class="sidebar">
       <label for="file" id="drop" class="drop" tabindex="0">
         <span class="drop-icon">↥</span>
@@ -48,8 +53,18 @@
             <button id="copy-tsv" class="btn">Copy table</button>
             <button id="download-xlsx" class="btn">Excel</button>
             <button id="download" class="btn ghost">TSV</button>
+            <button id="edit-table" class="btn ghost">Edit table</button>
             <button id="toggle-pdf" class="btn ghost">Show PDF</button>
           </div>
+        </div>
+
+        <div id="editbar" class="editbar" hidden>
+          <span class="editbar-hint">
+            Click any cell to edit it. Use the column headers to rename, reorder
+            or remove columns.
+          </span>
+          <button id="revert-edits" class="btn ghost" hidden>Restore original</button>
+          <button id="save-edits" class="btn primary" disabled>Saved</button>
         </div>
 
         <div id="failsafe" class="failsafe" hidden></div>
@@ -61,11 +76,25 @@
             <div class="table-wrap">
               <table id="table"></table>
             </div>
-            <p class="hint muted">
+            <p id="table-hint" class="hint muted">
               Click any cell to copy it. Click a column header to copy the whole column.
             </p>
           </div>
           <div class="pane pdf-pane" id="pdf-pane" hidden>
+            <div class="pdf-bar">
+              <button id="pick-region" class="btn ghost">Select region</button>
+              <button id="clear-region" class="btn ghost" hidden>Read whole page</button>
+              <span id="pdf-pager" class="muted"></span>
+              <span id="region-hint" class="muted" hidden>
+                Drag a box around the table.
+              </span>
+            </div>
+            <!-- Canvas viewer, used when a region can be drawn. The iframe
+                 remains the fallback for anything that is not a PDF. -->
+            <div id="pdf-canvas-wrap" class="pdf-canvas-wrap" hidden>
+              <canvas id="pdf-canvas"></canvas>
+              <div id="pdf-overlay" class="pdf-overlay"></div>
+            </div>
             <iframe id="pdf" title="Source PDF"></iframe>
           </div>
         </div>
@@ -73,7 +102,69 @@
     </section>
   </main>
 
+  <!-- Simple OCR: free text from one image. Nothing here is saved. -->
+  <main class="ocr-view" id="ocr-view" hidden>
+    <section class="ocr-input">
+      <label for="ocr-file" id="ocr-drop" class="drop ocr-drop" tabindex="0">
+        <img id="ocr-preview" class="ocr-preview" alt="" hidden />
+        <span id="ocr-drop-text">
+          <span class="drop-icon">↥</span><br />
+          <strong>Drop, paste or pick an image</strong><br />
+          <span class="muted">PNG, JPG, WEBP, TIFF - rotated or handwritten is fine</span>
+        </span>
+        <input id="ocr-file" type="file" accept="image/*" hidden />
+      </label>
+
+      <div class="ocr-controls">
+        <label class="field">
+          <span class="muted">Language</span>
+          <select id="ocr-language"></select>
+        </label>
+        <label class="field">
+          <span class="muted">Engine</span>
+          <select id="ocr-engine"></select>
+        </label>
+        <button id="ocr-run" class="btn primary" disabled>Extract text</button>
+      </div>
+      <p id="ocr-engine-note" class="hint muted"></p>
+    </section>
+
+    <section class="ocr-output">
+      <div class="ocr-output-head">
+        <h2>Text</h2>
+        <button id="ocr-copy" class="btn" disabled>Copy text</button>
+      </div>
+      <textarea id="ocr-text" class="ocr-text" spellcheck="false"
+                placeholder="The extracted text will appear here. You can edit it before copying."></textarea>
+      <p id="ocr-note" class="hint muted"></p>
+    </section>
+  </main>
+
+  <!-- Deposit slips: Claude reads each slip, the page checks the arithmetic,
+       and CSV export stays blocked until every slip reconciles. -->
+  <main class="slips-view" id="slips-view" hidden>
+    <div class="slips-head">
+      <label for="slip-file" id="slip-drop" class="drop slip-drop" tabindex="0">
+        <span class="drop-icon">↥</span>
+        <strong>Drop deposit slips</strong>
+        <span class="muted">One image per slip - several at once is fine</span>
+        <input id="slip-file" type="file" accept="image/*" multiple hidden />
+      </label>
+      <div class="slips-actions">
+        <div id="slip-summary" class="muted"></div>
+        <div class="slips-buttons">
+          <button id="slip-clear" class="btn ghost" hidden>Clear all</button>
+          <button id="slip-csv" class="btn primary" disabled>Download CSV</button>
+        </div>
+        <p id="slip-engine-note" class="hint muted"></p>
+      </div>
+    </div>
+    <div id="slip-list" class="slip-list"></div>
+  </main>
+
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/vendor/pdf.min.js"></script>
   <script src="/app.js"></script>
+  <script src="/slips.js"></script>
 </body>
 </html>

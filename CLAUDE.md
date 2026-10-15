@@ -9,7 +9,8 @@ PDFs and CSV/TSV exports, validates the figures against the statement's own
 declared totals, and exports to Excel/TSV. Built for copying values out — the
 source PDFs are frequently unusable via copy/paste.
 
-Companion docs: [docs/FEATURES.md](docs/FEATURES.md) ·
+Companion docs: [README.md](README.md) (human-facing overview) ·
+[docs/FEATURES.md](docs/FEATURES.md) ·
 [docs/STACK.md](docs/STACK.md) · [docs/FILES.md](docs/FILES.md) ·
 [CARRIERS.md](CARRIERS.md) (per-carrier support status) ·
 [docs/TAILSCALE.md](docs/TAILSCALE.md) (how it is served and shared; in Spanish) ·
@@ -126,6 +127,45 @@ Three things it must keep doing:
 carriers currently extract figures that do not reconcile and are blocked from
 export. Never loosen the failsafe to make a scan pass.
 
+### Simple OCR (`app/image_ocr.py`)
+
+A separate tab (`#ocr` in the navbar) that turns one image into plain text. It is
+**not** part of the statement pipeline: no `Statement`, no failsafe, nothing
+persisted. Kept apart from `app/ocr.py` on purpose, because the two are tuned
+against different inputs and their constants answer different questions.
+
+Two engines, chosen per request with a language hint:
+
+- **Claude** (`claude-opus-5-5`, vision) is the handwriting engine. It sends the
+  image to the Anthropic API and needs `ANTHROPIC_API_KEY` in the server's
+  environment. The UI says so next to the engine picker.
+- **Tesseract** is local. Rotation is picked by confidence across four angles
+  under `--psm 6`. PSM 3 reads sideways blocks on its own, which flattens the
+  confidence gap, and it chose the wrong angle on a handwritten page. Language
+  packs beyond `eng` must be installed. A missing pack raises an error rather
+  than silently reading as English.
+
+### Deposit slips (`#slips`, `app/static/slips.js`)
+
+Claude reads each slip into the fields the business uses (`deposit_slip()`,
+JSON-schema structured output). They are listed with their position on the
+slip in `SLIP_SYSTEM_PROMPT`: date, office, cash (explicitly present or absent),
+every payment, and the two optional totals.
+
+The arithmetic check lives in `slips.js` and runs again on every edit. The two
+totals cross-validate independently: **check total** = payments, **net total** =
+payments + cash. So a misread cash figure fails only the net total, and a misread
+payment fails both. A slip with neither total is "unverified" and goes into the
+CSV only after someone confirms it by hand; any edit withdraws that confirmation.
+The CSV's `Verified` column records which route each slip took. Export is blocked
+until every slip is cross-checked or confirmed.
+
+**The prompt forbids adjusting a figure to make the totals agree.** If the model
+were allowed to "fix" a digit so it matches the subtotal, the check would become
+circular and every misread would turn into a false pass. The first real slip
+showed why: `2,842.⁰⁰` reads naturally as `2,842.60`, and only the subtotal gives
+it away. Amounts are strings and the check uses integer cents.
+
 ### Two ways a layout is recognised
 
 - `TEMPLATES` — hand-written entries (currently Chris Leef, Vertigo). Header
@@ -173,6 +213,31 @@ count unchanged. There is **no signup route**; accounts come from
 `Secure` on the cookie is derived from the request scheme, not hardcoded: over
 Tailscale this is real HTTPS and the flag must be set, but a Secure cookie is
 never returned over `http://localhost` and local development could not log in.
+
+**A region crops detection, never validation.** `parse_pdf(..., region=...)`
+takes a box as fractions of a page and drops words outside it before `_lines()`,
+so a table buried in letterhead can be isolated by hand
+(`POST /api/statements/{id}/reparse`). It builds **two** views of the pages:
+`table_pages` is cropped and feeds template matching and `_auto_detect`, while
+`pages` stays whole and feeds `_finalise`. That split is the safety property -
+`declared_totals` must keep scanning the entire page, or cropping to the table
+would throw away the labelled total the failsafe reconciles against, exactly
+when the user is steering the parse by hand. Verified: a crop that excludes the
+declared total still finds it. Fractions rather than points because the box is
+drawn in a browser at arbitrary zoom. A re-parse clears edits and `original` -
+it is a fresh extraction - but `store.replace_statement` keeps the uploader and
+the original upload time, because it is the same file read again.
+
+**Editing never moves the failsafe verdict.** The table can be edited before
+export (`PATCH /api/statements/{id}`), but `payout` is carried across untouched.
+The verdict answers "did we extract correctly what the carrier sent?" - a fact
+about the extraction, settled when the file was parsed. An edit must be able
+neither to clear a real mismatch nor to manufacture one. What an edit *can* do is
+move the table away from the figure the failsafe measured, and that is reported
+as an `EDITED:` warning plus `edited_total`, with the banner reworded from
+"exports N" to "checked N - now edited" so it stops implying a figure it no
+longer governs. `store.update_statement` keeps the pre-edit payload in
+`original`, written once, so the carrier's own figures stay recoverable.
 
 **Export scoping matters more than it looks.** In memory, "export all" meant
 today's uploads. Once statements persist it would mean *every statement ever

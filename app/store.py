@@ -103,7 +103,13 @@ CREATE TABLE IF NOT EXISTS statements (
   exported_total REAL,
   source_suffix  TEXT NOT NULL DEFAULT '',
   source_sha256  TEXT NOT NULL DEFAULT '',
-  payload        TEXT NOT NULL
+  payload        TEXT NOT NULL,
+  -- Set once, on the first edit: the payload exactly as extracted. This is
+  -- financial data taken from a carrier document, so what the carrier actually
+  -- sent must stay recoverable no matter what anyone types over it afterwards.
+  original       TEXT,
+  edited_by      TEXT,
+  edited_at      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_stmt_uploaded ON statements(uploaded_at DESC);
 CREATE INDEX IF NOT EXISTS idx_stmt_carrier  ON statements(carrier);
@@ -141,9 +147,28 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+# Columns added after the first release. CREATE TABLE IF NOT EXISTS does nothing
+# to a table that already exists, so new columns need an explicit ALTER - there
+# are live databases with statements already in them.
+_ADDED_COLUMNS: list[tuple[str, str, str]] = [
+    ("statements", "original", "TEXT"),      # payload as first extracted
+    ("statements", "edited_by", "TEXT"),     # display name of the last editor
+    ("statements", "edited_at", "TEXT"),
+]
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns missing from an older database. Idempotent."""
+    for table, column, decl in _ADDED_COLUMNS:
+        existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def init() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
 
 
 # --- passwords ---------------------------------------------------------------
@@ -386,10 +411,104 @@ def save_statement(
     return payload
 
 
+def update_statement(sid: str, payload: dict, editor: str) -> dict:
+    """Save a user-edited payload, preserving the original and the verdict.
+
+    **The failsafe verdict is deliberately not recomputed here.** It answers
+    "did we extract correctly what the carrier sent?" - a fact about the
+    extraction, settled the moment the file was parsed. Editing the table
+    afterwards is a different question and must not be able to rewrite that
+    answer, in either direction: an edit can neither clear a real mismatch nor
+    manufacture one.
+
+    What an edit *can* do is make the table disagree with the figure the
+    failsafe measured. That is surfaced as a warning on the statement, computed
+    by the caller, and the "edited" markers below make sure an edited statement
+    is never mistaken for a pristine extraction.
+
+    `original` is written once and never overwritten, so the carrier's figures
+    remain recoverable however many times the table is edited afterwards.
+    """
+    now = _iso(_now())
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT payload, original FROM statements WHERE id = ?", (sid,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(sid)
+
+        original = row["original"] or row["payload"]
+        payload = {**payload, "edited_by": editor, "edited_at": now}
+
+        conn.execute(
+            "UPDATE statements SET payload = ?, original = ?, edited_by = ?,"
+            " edited_at = ?, row_count = ? WHERE id = ?",
+            (
+                json.dumps(payload),
+                original,
+                editor,
+                now,
+                len(payload.get("rows") or []),
+                sid,
+            ),
+        )
+    return payload
+
+
+def replace_statement(sid: str, payload: dict) -> dict:
+    """Swap in a freshly extracted payload, keeping who uploaded it and when.
+
+    Used by re-parse. Distinct from save_statement, which would need a user id
+    and would stamp a new upload time - a re-parse is the same upload read
+    again, not a new one, and the history must keep saying who actually sent it.
+
+    Edit markers are cleared: they described a table that no longer exists, and
+    `original` means "as extracted", which this now is.
+    """
+    payout = payload.get("payout") or {}
+    with connect() as conn:
+        if conn.execute(
+            "SELECT 1 FROM statements WHERE id = ?", (sid,)
+        ).fetchone() is None:
+            raise KeyError(sid)
+        conn.execute(
+            "UPDATE statements SET payload = ?, carrier = ?, row_count = ?,"
+            " failsafe = ?, exported_total = ?, original = NULL,"
+            " edited_by = NULL, edited_at = NULL WHERE id = ?",
+            (
+                json.dumps(payload),
+                payload.get("template", ""),
+                len(payload.get("rows") or []),
+                payout.get("status", ""),
+                payout.get("exported_total"),
+                sid,
+            ),
+        )
+    return payload
+
+
+def revert_statement(sid: str) -> dict | None:
+    """Restore the payload as first extracted. Returns it, or None if unedited."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT original FROM statements WHERE id = ?", (sid,)
+        ).fetchone()
+        if row is None or not row["original"]:
+            return None
+        payload = json.loads(row["original"])
+        conn.execute(
+            "UPDATE statements SET payload = ?, original = NULL, edited_by = NULL,"
+            " edited_at = NULL, row_count = ? WHERE id = ?",
+            (row["original"], len(payload.get("rows") or []), sid),
+        )
+    return payload
+
+
 def get_statement(sid: str) -> dict | None:
     with connect() as conn:
         row = conn.execute(
-            "SELECT s.payload, s.uploaded_at, u.display_name, u.email"
+            "SELECT s.payload, s.uploaded_at, s.original, s.edited_by,"
+            " s.edited_at, u.display_name, u.email"
             " FROM statements s LEFT JOIN users u ON u.id = s.user_id"
             " WHERE s.id = ?",
             (sid,),
@@ -399,6 +518,12 @@ def get_statement(sid: str) -> dict | None:
     payload = json.loads(row["payload"])
     payload["uploaded_at"] = row["uploaded_at"]
     payload["uploaded_by"] = row["display_name"] or row["email"] or ""
+    # `edited` drives the UI marker and whether Revert is offered. It is derived
+    # from `original` being set rather than from a flag, so it cannot drift out
+    # of step with whether there is actually something to revert to.
+    payload["edited"] = bool(row["original"])
+    payload["edited_by"] = row["edited_by"] or ""
+    payload["edited_at"] = row["edited_at"] or ""
     return payload
 
 
@@ -476,7 +601,7 @@ def list_statements(
         )
         rows = conn.execute(
             "SELECT s.id, s.filename, s.carrier, s.uploaded_at, s.row_count,"
-            " s.failsafe, s.exported_total, u.display_name, u.email"
+            " s.failsafe, s.exported_total, s.edited_at, u.display_name, u.email"
             " FROM statements s LEFT JOIN users u ON u.id = s.user_id"
             f"{clause} ORDER BY s.uploaded_at DESC, s.id LIMIT ? OFFSET ?",
             [*params, limit, offset],
@@ -493,6 +618,7 @@ def list_statements(
                 "failsafe": r["failsafe"],
                 "exported_total": r["exported_total"],
                 "uploaded_by": r["display_name"] or r["email"] or "",
+                "edited": bool(r["edited_at"]),
             }
             for r in rows
         ],

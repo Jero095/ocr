@@ -1,6 +1,6 @@
 const $ = (id) => document.getElementById(id);
 
-const state = { statements: [], activeId: null, user: null };
+const state = { statements: [], activeId: null, user: null, editing: null, dirty: false };
 
 // Every request goes through here so an expired session lands on the login page
 // instead of failing silently. The gate in app/auth.py answers /api/* with 401
@@ -99,6 +99,11 @@ function renderList() {
     if (s.pending) dot.className = "dot pending";
     else if (s.payout?.status === "mismatch") {
       dot.className = "dot bad";
+    } else if (s.edited) {
+      // Edited but not failed. Red would read as "this is wrong"; an edit is a
+      // deliberate act, it just means the table is no longer purely extracted.
+      dot.className = "dot edited";
+      dot.title = "Edited after extraction";
     } else {
       const ok = s.payout?.status === "match" || (s.checks?.length && s.checks.every((c) => c.ok));
       dot.className = "dot " + (ok && !s.warnings?.length ? "ok" : "bad");
@@ -152,9 +157,12 @@ function renderViewer() {
   if (!s) return;
 
   $("title").textContent = s.filename;
-  $("carrier").textContent = s.template
+  const edited = s.edited
+    ? ` · edited${s.edited_by ? ` by ${s.edited_by}` : ""}`
+    : "";
+  $("carrier").textContent = (s.template
     ? `${s.template} · ${s.rows.length} row${s.rows.length === 1 ? "" : "s"}`
-    : "Layout not recognised";
+    : "Layout not recognised") + edited;
 
   $("badges").innerHTML = "";
   for (const c of s.checks) {
@@ -179,7 +187,19 @@ function renderViewer() {
   }
 
   renderTable(s);
-  $("pdf").src = `/api/statements/${s.id}/pdf`;
+  renderEditBar();
+  openPdfViewer(s).catch(() => {
+    // Falling back to the plain viewer is better than an empty pane: the user
+    // loses region selection, not the ability to look at the document.
+    $("pdf-canvas-wrap").hidden = true;
+    $("pdf").hidden = false;
+    $("pdf").src = `/api/statements/${s.id}/pdf`;
+    $("pick-region").hidden = true;
+  });
+  $("table-hint").textContent =
+    state.editing === s.id
+      ? "Click a cell to edit it. Changes are saved only when you press Save."
+      : "Click any cell to copy it. Click a column header to copy the whole column.";
 }
 
 // Pinned to en-US: the statements are US-dollar documents and the table below
@@ -250,12 +270,31 @@ function renderFailsafe(s) {
     },
   }[p.status];
 
-  el.className = `failsafe ${view.cls}`;
+  // The verdict is a fact about the extraction and never changes once measured.
+  // But its wording says "exports N", and after an edit that figure is no longer
+  // what leaving the app would carry - so say so rather than let the banner
+  // imply a number it stopped governing.
+  const drifted =
+    typeof s.edited_total === "number" &&
+    typeof p.exported_total === "number" &&
+    Math.abs(s.edited_total - p.exported_total) > 0.01;
+
+  el.className = `failsafe ${view.cls}${drifted ? " drifted" : ""}`;
   el.innerHTML =
     `<span class="failsafe-icon">${view.icon}</span>` +
     `<span class="failsafe-body">` +
-    `<div class="failsafe-title">${view.title}</div>` +
-    `<div class="failsafe-detail">${view.detail}</div>` +
+    `<div class="failsafe-title">${
+      drifted
+        ? `${view.title.replace(/exports/, "checked")} — now edited`
+        : view.title
+    }</div>` +
+    `<div class="failsafe-detail">${view.detail}${
+      drifted
+        ? ` <b>Your edits changed the table: it now totals ${money(
+            s.edited_total,
+          )}, which is what an export would carry.</b>`
+        : ""
+    }</div>` +
     `</span>`;
 
   setExportEnabled(p.status !== "mismatch");
@@ -307,21 +346,64 @@ function renderTable(s) {
     return;
   }
 
+  const editing = state.editing === s.id;
+
   const thead = table.createTHead();
   const hr = thead.insertRow();
   s.columns.forEach((col, i) => {
     const th = document.createElement("th");
-    th.textContent = col;
-    th.title = `Copy the ${col} column`;
-    th.onclick = () => {
-      const vals = s.rows.map((r) => r[col] ?? "");
-      copy(vals.join("\n"), col);
+
+    if (!editing) {
+      th.textContent = col;
+      th.title = `Copy the ${col} column`;
+      th.onclick = () => {
+        const vals = s.rows.map((r) => r[col] ?? "");
+        copy(vals.join("\n"), col);
+      };
+      hr.append(th);
+      return;
+    }
+
+    // Editing: the header is renamed in place and carries its own controls.
+    const name = document.createElement("span");
+    name.className = "col-name";
+    name.contentEditable = "true";
+    name.spellcheck = false;
+    name.textContent = col;
+    name.onblur = () => renameColumn(i, name.textContent.trim() || col);
+    name.onkeydown = (e) => {
+      if (e.key === "Enter") { e.preventDefault(); name.blur(); }
+      if (e.key === "Escape") { name.textContent = col; name.blur(); }
     };
+
+    const tools = document.createElement("span");
+    tools.className = "col-tools";
+    const button = (label, title, fn, disabled) => {
+      const b = document.createElement("button");
+      b.textContent = label;
+      b.title = title;
+      b.disabled = !!disabled;
+      b.onclick = (e) => { e.stopPropagation(); fn(); };
+      return b;
+    };
+    tools.append(
+      button("‹", "Move left", () => moveColumn(i, -1), i === 0),
+      button("›", "Move right", () => moveColumn(i, 1), i === s.columns.length - 1),
+      button("×", `Delete the ${col} column`, () => deleteColumn(i)),
+    );
+
+    th.append(name, tools);
     hr.append(th);
   });
 
+  if (editing) {
+    const th = document.createElement("th");
+    th.className = "row-tools-head";
+    hr.append(th);
+  }
+
   const tbody = table.createTBody();
-  const addRow = (data, cls) => {
+  const addRow = (data, cls, rowIndex) => {
     const tr = tbody.insertRow();
     if (cls) tr.className = cls;
     for (const col of s.columns) {
@@ -332,7 +414,17 @@ function renderTable(s) {
         td.classList.add("num");
         if (isNegative(val)) td.classList.add("neg");
       }
-      if (val) {
+
+      if (editing && rowIndex !== undefined) {
+        td.contentEditable = "true";
+        td.spellcheck = false;
+        td.classList.add("editable");
+        td.onblur = () => editCell(rowIndex, col, td.textContent.trim());
+        td.onkeydown = (e) => {
+          if (e.key === "Enter") { e.preventDefault(); td.blur(); }
+          if (e.key === "Escape") { td.textContent = val; td.blur(); }
+        };
+      } else if (val && !editing) {
         td.onclick = async () => {
           if (await copy(val, col)) {
             td.classList.add("flash");
@@ -341,10 +433,164 @@ function renderTable(s) {
         };
       }
     }
+
+    if (editing) {
+      const td = tr.insertCell();
+      td.className = "row-tools";
+      if (rowIndex !== undefined) {
+        const b = document.createElement("button");
+        b.textContent = "×";
+        b.title = "Delete this row";
+        b.onclick = () => deleteRow(rowIndex);
+        td.append(b);
+      }
+    }
   };
 
-  s.rows.forEach((r) => addRow(r));
+  s.rows.forEach((r, i) => addRow(r, null, i));
+  // The totals row is rendered but never editable: it is the statement's own
+  // figure, and the per-column checks compare the rows against it. Letting it
+  // be typed over would turn the one internal reference into another thing the
+  // user can accidentally change.
   if (s.totals && Object.keys(s.totals).length) addRow(s.totals, "totals");
+}
+
+/* ---------- editing ---------- */
+
+// Edits mutate the loaded statement and are saved explicitly. The failsafe
+// verdict is never recomputed here or on the server - see _apply_edit in
+// app/main.py for why.
+
+function markDirty() {
+  state.dirty = true;
+  renderEditBar();
+}
+
+function editCell(rowIndex, col, value) {
+  const s = active();
+  if (!s || (s.rows[rowIndex]?.[col] ?? "") === value) return;
+  s.rows[rowIndex][col] = value;
+  markDirty();
+}
+
+function renameColumn(index, name) {
+  const s = active();
+  const old = s.columns[index];
+  if (!s || old === name || s.columns.includes(name)) return;
+  s.columns[index] = name;
+  for (const row of s.rows) {
+    row[name] = row[old] ?? "";
+    delete row[old];
+  }
+  if (s.totals && old in s.totals) {
+    s.totals[name] = s.totals[old];
+    delete s.totals[old];
+  }
+  markDirty();
+  renderTable(s);
+}
+
+function moveColumn(index, delta) {
+  const s = active();
+  const to = index + delta;
+  if (!s || to < 0 || to >= s.columns.length) return;
+  const [col] = s.columns.splice(index, 1);
+  s.columns.splice(to, 0, col);
+  markDirty();
+  renderTable(s);
+}
+
+function deleteColumn(index) {
+  const s = active();
+  if (!s) return;
+  // Deleting the commission column is allowed, but it is worth a confirmation:
+  // the export then carries no reconciled figure at all.
+  const col = s.columns[index];
+  if (col === s.payout?.commission_column &&
+      !confirm(`"${col}" is the column the failsafe checked. Delete it anyway?`)) {
+    return;
+  }
+  s.columns.splice(index, 1);
+  markDirty();
+  renderTable(s);
+}
+
+function deleteRow(index) {
+  const s = active();
+  if (!s) return;
+  s.rows.splice(index, 1);
+  markDirty();
+  renderTable(s);
+}
+
+function renderEditBar() {
+  const s = active();
+  const bar = $("editbar");
+  const editing = s && state.editing === s.id;
+  bar.hidden = !editing;
+  $("edit-table").textContent = editing ? "Done" : "Edit table";
+  if (!editing) return;
+  $("save-edits").disabled = !state.dirty;
+  $("save-edits").textContent = state.dirty ? "Save changes" : "Saved";
+  $("revert-edits").hidden = !s.edited;
+}
+
+async function saveEdits() {
+  const s = active();
+  if (!s) return;
+  $("save-edits").disabled = true;
+  $("save-edits").textContent = "Saving…";
+  try {
+    const res = await api(`/api/statements/${s.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ columns: s.columns, rows: s.rows }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      toast(data.detail || "Could not save");
+      renderEditBar();
+      return;
+    }
+    const saved = await res.json();
+    const i = state.statements.findIndex((v) => v.id === s.id);
+    state.statements[i] = saved;
+    state.dirty = false;
+    toast("Changes saved");
+    renderList();
+    renderViewer();
+  } catch {
+    toast("Save failed");
+    renderEditBar();
+  }
+}
+
+async function revertEdits() {
+  const s = active();
+  if (!s || !confirm("Discard all edits and restore the table as extracted?")) return;
+  const res = await api(`/api/statements/${s.id}/revert`, { method: "POST" });
+  if (!res.ok) { toast("Could not revert"); return; }
+  const restored = await res.json();
+  const i = state.statements.findIndex((v) => v.id === s.id);
+  state.statements[i] = restored;
+  state.dirty = false;
+  toast("Restored as extracted");
+  renderList();
+  renderViewer();
+}
+
+function toggleEdit() {
+  const s = active();
+  if (!s) return;
+  if (state.editing === s.id) {
+    if (state.dirty && !confirm("You have unsaved changes. Leave edit mode?")) return;
+    state.editing = null;
+    state.dirty = false;
+  } else {
+    state.editing = s.id;
+    state.dirty = false;
+  }
+  renderViewer();
 }
 
 /* ---------- wiring ---------- */
@@ -458,5 +704,353 @@ async function boot() {
   renderViewer();
 }
 
+$("edit-table").onclick = toggleEdit;
+$("save-edits").onclick = saveEdits;
+$("revert-edits").onclick = revertEdits;
 $("signout").onclick = signOut;
 boot();
+
+/* ---------- PDF region selection ---------- */
+
+// Drawing a box over the page restricts *table detection* to what is inside it,
+// which is how a statement buried in letterhead and legal copy gets read. The
+// box is stored as fractions of the page, so it survives zoom, window size and
+// a restart. The server deliberately keeps validating against the whole page -
+// see parse_pdf, the crop must never narrow what checks the figures.
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = "/vendor/pdf.worker.min.js";
+
+const pdfView = { doc: null, page: 1, sid: null, viewport: null, picking: false, chain: null };
+
+async function openPdfViewer(s) {
+  const wrap = $("pdf-canvas-wrap");
+  const frame = $("pdf");
+
+  // Only PDFs can be drawn on; a CSV keeps the plain viewer.
+  if (!/\.pdf$/i.test(s.filename)) {
+    wrap.hidden = true;
+    frame.hidden = false;
+    frame.src = `/api/statements/${s.id}/pdf`;
+    $("pick-region").hidden = true;
+    $("clear-region").hidden = true;
+    $("pdf-pager").textContent = "";
+    return;
+  }
+
+  $("pick-region").hidden = false;
+  $("clear-region").hidden = !s.region;
+  frame.hidden = true;
+  frame.removeAttribute("src");
+  wrap.hidden = false;
+
+  if (pdfView.sid !== s.id) {
+    pdfView.sid = s.id;
+    pdfView.page = (s.region?.page ?? 0) + 1;
+    const res = await api(`/api/statements/${s.id}/pdf`);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    pdfView.doc = await pdfjsLib.getDocument({ data: bytes }).promise;
+  }
+  await renderPdfPage(s);
+}
+
+// Renders are serialised through one chain. Cancelling the in-flight task is
+// not enough on its own: several callers can read pdfView.task before any of
+// them assigns it, since the first await yields. pdf.js then refuses the second
+// render with "same canvas in use". A queue removes the race rather than
+// narrowing it.
+function renderPdfPage(s) {
+  pdfView.chain = (pdfView.chain || Promise.resolve())
+    .catch(() => {})
+    .then(() => drawPdfPage(s));
+  return pdfView.chain;
+}
+
+async function drawPdfPage(s) {
+  if (!pdfView.doc) return;
+  const page = await pdfView.doc.getPage(pdfView.page);
+  const canvas = $("pdf-canvas");
+  const wrap = $("pdf-canvas-wrap");
+
+  // Fit the width of the pane; the overlay is sized to match exactly so a box
+  // drawn on it converts to page fractions with no offset maths.
+  const scale = Math.max(0.2, (wrap.clientWidth - 2) / page.getViewport({ scale: 1 }).width);
+  const viewport = page.getViewport({ scale });
+  pdfView.viewport = viewport;
+
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  canvas.style.width = viewport.width + "px";
+  canvas.style.height = viewport.height + "px";
+  const overlay = $("pdf-overlay");
+  overlay.style.width = viewport.width + "px";
+  overlay.style.height = viewport.height + "px";
+
+  // renderViewer runs on every list/selection change, so renders overlap and
+  // pdf.js refuses a second one on a canvas already in use. Cancel the one in
+  // flight rather than let the newer call throw into the fallback path.
+  await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+
+  $("pdf-pager").textContent =
+    pdfView.doc.numPages > 1 ? `Page ${pdfView.page} of ${pdfView.doc.numPages}` : "";
+
+  overlay.innerHTML = "";
+  if (s.region && s.region.page === pdfView.page - 1) drawSavedRegion(s.region);
+}
+
+function drawSavedRegion(r) {
+  const box = document.createElement("div");
+  box.className = "region saved";
+  box.style.left = r.x0 * 100 + "%";
+  box.style.top = r.y0 * 100 + "%";
+  box.style.width = (r.x1 - r.x0) * 100 + "%";
+  box.style.height = (r.y1 - r.y0) * 100 + "%";
+  $("pdf-overlay").append(box);
+}
+
+function startRegionPick() {
+  const s = active();
+  if (!s || !pdfView.doc) return;
+  pdfView.picking = true;
+  $("pdf-overlay").classList.add("picking");
+  $("region-hint").hidden = false;
+  $("pick-region").textContent = "Cancel";
+}
+
+function stopRegionPick() {
+  pdfView.picking = false;
+  $("pdf-overlay").classList.remove("picking");
+  $("region-hint").hidden = true;
+  $("pick-region").textContent = "Select region";
+}
+
+// Fractions of the overlay, exactly as the sibling PDF tool does it: the same
+// box means the same thing at any zoom or screen size.
+$("pdf-overlay").addEventListener("pointerdown", (e) => {
+  if (!pdfView.picking) return;
+  e.preventDefault();
+  const overlay = $("pdf-overlay");
+  const rect = overlay.getBoundingClientRect();
+  const start = { x: e.clientX, y: e.clientY };
+  const box = document.createElement("div");
+  box.className = "region drawing";
+  overlay.append(box);
+
+  const move = (ev) => {
+    const x0 = Math.min(start.x, ev.clientX) - rect.left;
+    const y0 = Math.min(start.y, ev.clientY) - rect.top;
+    box.style.left = x0 + "px";
+    box.style.top = y0 + "px";
+    box.style.width = Math.abs(ev.clientX - start.x) + "px";
+    box.style.height = Math.abs(ev.clientY - start.y) + "px";
+  };
+
+  const up = async (ev) => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    box.remove();
+
+    const region = {
+      page: pdfView.page - 1,
+      x0: (Math.min(start.x, ev.clientX) - rect.left) / rect.width,
+      y0: (Math.min(start.y, ev.clientY) - rect.top) / rect.height,
+      x1: (Math.max(start.x, ev.clientX) - rect.left) / rect.width,
+      y1: (Math.max(start.y, ev.clientY) - rect.top) / rect.height,
+    };
+    for (const k of ["x0", "y0", "x1", "y1"]) {
+      region[k] = Math.min(1, Math.max(0, region[k]));
+    }
+    stopRegionPick();
+    if (region.x1 - region.x0 < 0.01 || region.y1 - region.y0 < 0.01) {
+      toast("That box is too small");
+      return;
+    }
+    await reparse(region);
+  };
+
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+});
+
+async function reparse(region) {
+  const s = active();
+  if (!s) return;
+  if (s.edited && !confirm("Re-reading replaces the table and discards your edits. Continue?")) {
+    return;
+  }
+  toast(region ? "Reading the selected region…" : "Reading the whole page…");
+  const res = await api(`/api/statements/${s.id}/reparse`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ region }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    toast(data.detail || "Could not re-read that file");
+    return;
+  }
+  const updated = await res.json();
+  const i = state.statements.findIndex((v) => v.id === s.id);
+  state.statements[i] = updated;
+  state.editing = null;
+  state.dirty = false;
+  toast(`${updated.rows.length} row${updated.rows.length === 1 ? "" : "s"} found`);
+  renderList();
+  renderViewer();
+}
+
+$("pick-region").onclick = () => (pdfView.picking ? stopRegionPick() : startRegionPick());
+$("clear-region").onclick = () => reparse(null);
+
+/* ---------- navbar ---------- */
+
+// Hash routing keeps it one page: the statement viewer keeps its state while the
+// OCR view is open, and a reload lands back on the same section.
+const VIEWS = ["statements", "ocr", "slips"];
+
+function showView() {
+  const wanted = location.hash.slice(1);
+  const view = VIEWS.includes(wanted) ? wanted : "statements";
+  for (const v of VIEWS) $(`${v}-view`).hidden = v !== view;
+  $("export-all").style.visibility = view === "statements" ? "" : "hidden";
+  document.querySelectorAll(".nav-link").forEach((a) =>
+    a.classList.toggle("active", a.dataset.view === view)
+  );
+  if (view === "ocr" || view === "slips") loadOcrOptions();
+}
+window.addEventListener("hashchange", showView);
+
+/* ---------- simple OCR ---------- */
+
+// One image in, plain text out. Nothing is stored server-side.
+const ocr = { file: null, options: null, previewUrl: null };
+
+function remember(key, value) {
+  try { localStorage.setItem(key, value); } catch {}
+}
+function recall(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+async function loadOcrOptions() {
+  if (ocr.options) return;
+  const res = await api("/api/ocr/options").catch(() => null);
+  if (!res) return;
+  ocr.options = await res.json();
+
+  const lang = $("ocr-language");
+  lang.innerHTML = "";
+  for (const l of ocr.options.languages) lang.add(new Option(l.label, l.code));
+  lang.value = recall("ocr-language") || "auto";
+
+  const eng = $("ocr-engine");
+  eng.innerHTML = "";
+  for (const e of ocr.options.engines) {
+    const opt = new Option(e.label + (e.available ? "" : " - unavailable"), e.id);
+    opt.disabled = !e.available;
+    eng.add(opt);
+  }
+  const saved = ocr.options.engines.find((e) => e.id === recall("ocr-engine") && e.available);
+  const first = ocr.options.engines.find((e) => e.available);
+  eng.value = (saved || first || ocr.options.engines[0]).id;
+  renderEngineNote();
+  updateOcrButtons();
+  document.dispatchEvent(new Event("ocr-options"));
+}
+
+function renderEngineNote() {
+  const e = ocr.options?.engines.find((x) => x.id === $("ocr-engine").value);
+  const unavailable = (ocr.options?.engines || [])
+    .filter((x) => !x.available)
+    .map((x) => `${x.label}: ${x.reason}`);
+  const lines = [];
+  if (e && !e.local) lines.push("The image is sent to the Anthropic API to be read.");
+  if (e && e.local) lines.push("Runs on this machine. Weak on handwriting.");
+  $("ocr-engine-note").textContent = [...lines, ...unavailable].join(" ");
+}
+
+function updateOcrButtons() {
+  const engineOk = ocr.options?.engines.some((e) => e.id === $("ocr-engine").value && e.available);
+  $("ocr-run").disabled = !(ocr.file && engineOk);
+  $("ocr-copy").disabled = !$("ocr-text").value.trim();
+}
+
+function setOcrFile(file) {
+  if (!file) return;
+  if (!file.type.startsWith("image/")) {
+    toast(`${file.name || "That file"} is not an image`);
+    return;
+  }
+  ocr.file = file;
+  if (ocr.previewUrl) URL.revokeObjectURL(ocr.previewUrl);
+  ocr.previewUrl = URL.createObjectURL(file);
+  $("ocr-preview").src = ocr.previewUrl;
+  $("ocr-preview").hidden = false;
+  $("ocr-drop-text").hidden = true;
+  updateOcrButtons();
+}
+
+async function runOcr() {
+  if (!ocr.file) return;
+  const btn = $("ocr-run");
+  btn.disabled = true;
+  btn.textContent = "Reading...";
+  $("ocr-note").textContent = "";
+  const form = new FormData();
+  // Pasted images arrive without a name; the server checks the extension.
+  const name = ocr.file.name || `pasted.${(ocr.file.type.split("/")[1] || "png")}`;
+  form.append("file", ocr.file, name);
+  form.append("engine", $("ocr-engine").value);
+  form.append("language", $("ocr-language").value);
+  try {
+    const res = await api("/api/ocr", { method: "POST", body: form });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      $("ocr-note").textContent = body.detail || `Failed (${res.status})`;
+      toast("OCR failed");
+      return;
+    }
+    $("ocr-text").value = body.text;
+    $("ocr-note").textContent = body.note || "";
+  } catch (err) {
+    if (err.message !== "signed out") $("ocr-note").textContent = `Failed: ${err.message}`;
+  } finally {
+    btn.textContent = "Extract text";
+    updateOcrButtons();
+  }
+}
+
+const ocrDrop = $("ocr-drop");
+["dragenter", "dragover"].forEach((ev) =>
+  ocrDrop.addEventListener(ev, (e) => { e.preventDefault(); ocrDrop.classList.add("over"); })
+);
+["dragleave", "drop"].forEach((ev) =>
+  ocrDrop.addEventListener(ev, (e) => { e.preventDefault(); ocrDrop.classList.remove("over"); })
+);
+ocrDrop.addEventListener("drop", (e) => setOcrFile(e.dataTransfer.files[0]));
+ocrDrop.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("ocr-file").click(); }
+});
+$("ocr-file").onchange = (e) => { setOcrFile(e.target.files[0]); e.target.value = ""; };
+
+// Paste a screenshot straight from the clipboard while the OCR view is open.
+document.addEventListener("paste", (e) => {
+  if ($("ocr-view").hidden) return;
+  const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith("image/"));
+  if (!item) return;
+  e.preventDefault();
+  setOcrFile(item.getAsFile());
+});
+
+$("ocr-language").onchange = (e) => remember("ocr-language", e.target.value);
+$("ocr-engine").onchange = (e) => {
+  remember("ocr-engine", e.target.value);
+  renderEngineNote();
+  updateOcrButtons();
+  document.dispatchEvent(new Event("ocr-options"));
+};
+$("ocr-run").onclick = runOcr;
+$("ocr-text").oninput = updateOcrButtons;
+$("ocr-copy").onclick = () => copy($("ocr-text").value, "Text");
+
+// Deferred so slips.js, which loads after this file, is in place first.
+window.addEventListener("DOMContentLoaded", showView);

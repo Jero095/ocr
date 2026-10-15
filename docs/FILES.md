@@ -3,6 +3,7 @@
 What each file is responsible for, and the load-bearing pieces inside it.
 
 ```
+README.md                     human-facing overview and quick start
 CLAUDE.md                     guidance for Claude Code
 CARRIERS.md                   generated per-carrier support registry
 requirements.txt              6 runtime deps + the Tesseract engine
@@ -19,23 +20,28 @@ docs/
   DEPLOYMENT.md               architecture reference, Docker pipeline, Railway
 app/
   __init__.py                 marks app/ a package (empty)
-  extract.py    1069 lines    PDF geometry engine, templates, failsafe, Statement
+  extract.py    1163 lines    PDF geometry engine, templates, failsafe, Statement
   ocr.py         226 lines    OCR for image-only scans -> word boxes in points
   tabular.py     383 lines    CSV/TSV loading and cleaning
-  store.py       533 lines    SQLite: statements, users, sessions
+  store.py       669 lines    SQLite: statements, users, sessions, edits
   auth.py         96 lines    the gate: middleware, session cookies
   excel.py       247 lines    .xlsx workbook construction
-  main.py        350 lines    FastAPI routes, upload, export guard
+  main.py        511 lines    FastAPI routes, upload, editing, export guard
   static/
-    app.js       462 lines    all frontend behaviour
-    style.css    557 lines    design tokens, dark/light, layout
-    index.html    79 lines    page skeleton
+    app.js       902 lines    all frontend behaviour
+    style.css    648 lines    design tokens, dark/light, layout
+    index.html    104 lines    page skeleton
     login.html    73 lines    sign-in page
+    vendor/                   pdf.js + worker, for the region selector
 scripts/
   carriers_report.py  194     sweeps statements/, regenerates CARRIERS.md
   failsafe_report.py   37     per-file payout reconciliation table
   ocr_report.py       147     OCR settings swept against the scans
+  adduser.py          126     create/list/disable accounts
+  start_server.bat            run for everyday use (no --reload)
+  start_server_hidden.vbs     same, no console window; used at sign-in
 statements/                   real client statements - gitignored
+data/                         SQLite + uploads - gitignored, holds PII
 ```
 
 ---
@@ -79,6 +85,11 @@ ingestion paths and every consumer depend on it.
 - `_looks_like_header` / `_looks_like_data` — the gates. `_FOOTER_RE` strips page
   furniture (`Page 1 of 1`, print dates, emails) that otherwise parses as data.
 - `carrier_from_filename()` — strips amounts and `(1)` suffixes.
+
+**Editing support** — `commission_total()` returns the commission column and
+what it currently sums to. Factored out of `_payout_check` so the edit path
+measures the column exactly the way the failsafe does, rather than growing a
+second implementation that could drift.
 
 **Canonical mapping** — `CANONICAL_FIELDS`, `_CANONICAL_PATTERNS`,
 `infer_canonical()`, `canonical_map()`. Lives here rather than in `excel.py`
@@ -153,6 +164,8 @@ statement is one payload blob plus indexed columns for listing.
   per-IP because everyone arrives over the same Tailscale connection.
 - `save_statement` / `get_statement` / `list_statements` — the payload is the
   source of truth; the scalar columns are denormalised copies for filtering.
+- `update_statement()` / `revert_statement()` — save a user-edited payload,
+  preserving `original` and the failsafe verdict; restore it.
 - `recent_ids()` — the default export scope.
 - `duplicate_of()` — same file uploaded twice, by content hash. Surfaced, not
   blocked; history is shared so a second upload may be deliberate.
@@ -187,6 +200,10 @@ Imports its canonical mapping from `extract.py`; does not define its own.
 - Persistence goes through `store`; `main.py` holds no state of its own.
 - `_export_set()` — resolves `?ids=`, defaulting to the caller's last 24 hours.
   Without it, persistence silently turns "export all" into "the entire history".
+- `_apply_edit()` / `_rebuild_tsv()` — rebuild a payload around edited columns
+  and rows. Carries `payout` across untouched and reports any drift as an
+  `EDITED:` warning instead. `tsv` is stored, so it must be regenerated or the
+  clipboard would keep serving the pre-edit table.
 - `_guard_failsafe()` — raises **409** on any export whose failsafe failed. The
   UI disables the buttons, but the endpoints are directly reachable, so this is
   the real enforcement.

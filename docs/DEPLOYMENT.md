@@ -71,7 +71,7 @@ a third source type means producing a `Statement` and nothing else.
 
 Line counts are indicative and drift with edits.
 
-#### `app/extract.py` — the core (1069 lines, 28 functions)
+#### `app/extract.py` — the core
 
 Owns the `Statement` model, so every other module depends on it.
 
@@ -98,6 +98,7 @@ Owns the `Statement` model, so every other module depends on it.
 | `_merge_spans` | Merges overlapping intervals into column extents |
 | `_columns` | Derives column names and extents from a header band |
 | `_cells` | Assigns each word to the column it overlaps **most**. Never a distance merge |
+| `_crop` | Drops words outside a region given as fractions of the page. Keeps words that *overlap* the box, not only those contained by it |
 
 **Recognition and cleaning**
 
@@ -121,10 +122,11 @@ Owns the `Statement` model, so every other module depends on it.
 | `canonical_map` | Template mapping if there is one, else inference |
 | `filename_amount` | The amount in the filename — a reference from outside the table |
 | `declared_totals` | Labelled totals in the statement text, ranked so prior balances cannot produce a false pass |
+| `commission_total` | The commission column and what it currently sums to. Shared by the failsafe and the edit path so they cannot drift apart |
 | `_payout_check` | The reconciliation itself |
 | `_finalise` | Called on **every** exit path, so the failsafe can never be skipped |
 
-#### `app/ocr.py` — scans (226 lines, 5 functions)
+#### `app/ocr.py` — scans
 
 | Function | What it does |
 |---|---|
@@ -134,7 +136,7 @@ Owns the `Statement` model, so every other module depends on it.
 | `_words` | One `image_to_data` result → word dicts in points, with mean confidence |
 | `page_words` | Rasterise, choose rotation by measured confidence, OCR, scale to points |
 
-#### `app/tabular.py` — CSV/TSV (383 lines, 9 functions)
+#### `app/tabular.py` — CSV/TSV
 
 | Function | What it does |
 |---|---|
@@ -147,7 +149,7 @@ Owns the `Statement` model, so every other module depends on it.
 | `_clean_value`, `format_amount` | Apply the plan |
 | `parse_delimited` | Entry point; produces the same `Statement` |
 
-#### `app/store.py` — persistence (533+ lines, 26 functions)
+#### `app/store.py` — persistence
 
 Plain `sqlite3`, no ORM: `Statement.to_dict()` is already JSON, so a statement
 is one blob plus indexed columns for listing.
@@ -160,11 +162,13 @@ is one blob plus indexed columns for listing.
 | Lockout | `lock_remaining`, `_record_failure` |
 | Sessions | `create_session`, `session_user`, `delete_session`, `purge_expired_sessions` |
 | Statements | `save_statement`, `get_statement`, `list_statements`, `delete_statement`, `source_path`, `duplicate_of`, `recent_ids`, `carriers` |
+| Editing | `update_statement` (saves an edit, preserves `original` and the verdict), `revert_statement`, `replace_statement` (re-parse: new table, same uploader) |
+| Migration | `_migrate` — adds columns to databases created before a release; `CREATE TABLE IF NOT EXISTS` cannot |
 
 `recent_ids` is small but load-bearing: it is the default export scope, and it
 is what stops "export all" from meaning the entire history.
 
-#### `app/auth.py` — the gate (96 lines, 5 functions)
+#### `app/auth.py` — the gate
 
 | Function | What it does |
 |---|---|
@@ -176,7 +180,7 @@ is what stops "export all" from meaning the entire history.
 `PUBLIC_PATHS` is the complete anonymous surface: `/login`, `/api/login`,
 `/api/logout`, `/style.css`, `/favicon.ico`, `/api/health`.
 
-#### `app/excel.py` — workbook (247 lines, 8 functions)
+#### `app/excel.py` — workbook
 
 | Function | What it does |
 |---|---|
@@ -185,7 +189,7 @@ is what stops "export all" from meaning the entire history.
 | `_statement_sheet`, `_all_rows_sheet`, `_checks_sheet` | Per-sheet builders |
 | `_sheet_name`, `_style_header`, `_autosize` | Excel's constraints and formatting |
 
-#### `app/main.py` — API (350 lines, 20 functions)
+#### `app/main.py` — API
 
 | Endpoint | Function |
 |---|---|
@@ -195,9 +199,12 @@ is what stops "export all" from meaning the entire history.
 | `GET /api/statements` | `list_statements` — summaries only, paged |
 | `GET /api/statements/{id}` `/tsv` `/xlsx` `/pdf`, `DELETE` | `get_statement`, `get_tsv`, `get_xlsx`, `get_pdf`, `delete_statement` |
 | `GET /api/export.xlsx`, `/api/export.tsv` | `export_all_xlsx`, `export_all` |
+| `PATCH /api/statements/{id}` | `edit_statement` — save an edited table; `_apply_edit` carries the verdict across and reports drift, `_rebuild_tsv` keeps the stored TSV in step |
+| `POST /api/statements/{id}/reparse` | `reparse_statement` — re-extract, optionally cropped to a region |
+| `POST /api/statements/{id}/revert` | `revert_statement` — restore the table as extracted |
 | `GET /api/carriers` | `carriers` |
 
-`_guard_failsafe` raises **409** on any export whose figures do not reconcile,
+`_export_set` resolves `?ids=`; `_guard_failsafe` raises **409** on any export whose figures do not reconcile,
 including from history. `NoCacheStatic` serves the frontend `no-store`.
 
 #### `app/static/` — the UI
