@@ -646,3 +646,100 @@ td.editable:focus {
   border: 2px dashed var(--accent);
   background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
+
+/* ---------- navbar ---------- */
+
+.nav { display: flex; gap: 4px; margin-right: auto; margin-left: 12px; }
+
+.nav-link {
+  padding: 6px 12px;
+  border-radius: 8px;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.nav-link:hover { color: var(--text); background: var(--surface-2); }
+.nav-link.active { color: var(--text); background: var(--accent-soft); }
+
+/* .layout sets display:grid, which beats the UA [hidden] rule. */
+.layout[hidden], .ocr-view[hidden] { display: none; }
+
+/* ---------- simple OCR ---------- */
+
+.ocr-view {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(320px, 1.2fr);
+  gap: 24px;
+  padding: 24px;
+  min-height: 0;
+}
+
+.ocr-input, .ocr-output { display: flex; flex-direction: column; min-height: 0; }
+
+.ocr-drop { flex: 1; justify-content: center; min-height: 260px; overflow: hidden; }
+
+.ocr-preview {
+  max-width: 100%;
+  max-height: 60vh;
+  object-fit: contain;
+  border-radius: 6px;
+}
+
+.ocr-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+
+.field select {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 7px 28px 7px 10px;
+  border-radius: 8px;
+  font: 500 13px/1.3 inherit;
+  font-family: inherit;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+                    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: right 13px center, right 8px center;
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+}
+
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+
+.ocr-output-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.ocr-output-head h2 { margin: 0; font-size: 16px; }
+
+.ocr-text {
+  flex: 1;
+  min-height: 320px;
+  resize: none;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: 14px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.ocr-text:focus { outline: none; border-color: var(--accent); }
+
+@media (max-width: 900px) {
+  .ocr-view { grid-template-columns: 1fr; padding: 16px; }
+  .nav { margin-left: 0; }
+}

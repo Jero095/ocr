@@ -12,6 +12,10 @@
       <span class="mark"></span>
       <h1>Statement Reader</h1>
     </div>
+    <nav class="nav" aria-label="Sections">
+      <a href="#statements" data-view="statements" class="nav-link">Statements</a>
+      <a href="#ocr" data-view="ocr" class="nav-link">Simple OCR</a>
+    </nav>
     <div class="topbar-actions">
       <button id="export-all" class="btn" hidden>Export all to Excel</button>
       <span id="whoami" class="whoami"></span>
@@ -20,7 +24,7 @@
     </div>
   </header>
 
-  <main class="layout">
+  <main class="layout" id="statements-view">
     <aside class="sidebar">
       <label for="file" id="drop" class="drop" tabindex="0">
         <span class="drop-icon">↥</span>
@@ -94,6 +98,44 @@
           </div>
         </div>
       </div>
+    </section>
+  </main>
+
+  <!-- Simple OCR: free text from one image. Nothing here is saved. -->
+  <main class="ocr-view" id="ocr-view" hidden>
+    <section class="ocr-input">
+      <label for="ocr-file" id="ocr-drop" class="drop ocr-drop" tabindex="0">
+        <img id="ocr-preview" class="ocr-preview" alt="" hidden />
+        <span id="ocr-drop-text">
+          <span class="drop-icon">↥</span><br />
+          <strong>Drop, paste or pick an image</strong><br />
+          <span class="muted">PNG, JPG, WEBP, TIFF - rotated or handwritten is fine</span>
+        </span>
+        <input id="ocr-file" type="file" accept="image/*" hidden />
+      </label>
+
+      <div class="ocr-controls">
+        <label class="field">
+          <span class="muted">Language</span>
+          <select id="ocr-language"></select>
+        </label>
+        <label class="field">
+          <span class="muted">Engine</span>
+          <select id="ocr-engine"></select>
+        </label>
+        <button id="ocr-run" class="btn primary" disabled>Extract text</button>
+      </div>
+      <p id="ocr-engine-note" class="hint muted"></p>
+    </section>
+
+    <section class="ocr-output">
+      <div class="ocr-output-head">
+        <h2>Text</h2>
+        <button id="ocr-copy" class="btn" disabled>Copy text</button>
+      </div>
+      <textarea id="ocr-text" class="ocr-text" spellcheck="false"
+                placeholder="The extracted text will appear here. You can edit it before copying."></textarea>
+      <p id="ocr-note" class="hint muted"></p>
     </section>
   </main>
 

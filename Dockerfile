@@ -20,12 +20,21 @@ ENV PYTHONUNBUFFERED=1 \
 #                  language data and the orientation/script model. osd is NOT
 #                  optional here: app/ocr.py calls image_to_osd() to decide page
 #                  rotation, and several carriers ship sideways scans.
+# tesseract-ocr-fra/spa/por/ita/deu
+#                  the languages Simple OCR offers for its local engine
+#                  (app/image_ocr.py LANGUAGES). A missing pack is reported to
+#                  the user, not silently read as English.
 # libgl1, libglib2.0-0
 #                  shared libraries Pillow/pypdfium2 need to rasterise pages.
 RUN apt-get update && apt-get install --no-install-recommends -y \
         tesseract-ocr \
         tesseract-ocr-eng \
         tesseract-ocr-osd \
+        tesseract-ocr-fra \
+        tesseract-ocr-spa \
+        tesseract-ocr-por \
+        tesseract-ocr-ita \
+        tesseract-ocr-deu \
         libgl1 \
         libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*

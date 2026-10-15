@@ -127,6 +127,24 @@ Three things it must keep doing:
 carriers currently extract figures that do not reconcile and are blocked from
 export. Never loosen the failsafe to make a scan pass.
 
+### Simple OCR (`app/image_ocr.py`)
+
+A separate tab (`#ocr` in the navbar) that turns one image into plain text. It is
+**not** part of the statement pipeline: no `Statement`, no failsafe, nothing
+persisted. Kept apart from `app/ocr.py` on purpose, because the two are tuned
+against different inputs and their constants answer different questions.
+
+Two engines, chosen per request with a language hint:
+
+- **Claude** (`claude-opus-5-5`, vision) is the handwriting engine. It sends the
+  image to the Anthropic API and needs `ANTHROPIC_API_KEY` in the server's
+  environment. The UI says so next to the engine picker.
+- **Tesseract** is local. Rotation is picked by confidence across four angles
+  under `--psm 6`. PSM 3 reads sideways blocks on its own, which flattens the
+  confidence gap, and it chose the wrong angle on a handwritten page. Language
+  packs beyond `eng` must be installed. A missing pack raises an error rather
+  than silently reading as English.
+
 ### Two ways a layout is recognised
 
 - `TEMPLATES` — hand-written entries (currently Chris Leef, Vertigo). Header

@@ -21,7 +21,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 
-from . import auth, extract, store
+from . import auth, extract, image_ocr, store
 from .excel import CANONICAL_FIELDS, build_workbook, canonical_map
 from .extract import parse_pdf
 from .tabular import parse_delimited
@@ -447,6 +447,38 @@ def _export_set(user: dict, ids: str) -> list[dict]:
     if not statements:
         raise HTTPException(404, "Nothing to export.")
     return statements
+
+
+# --- simple OCR --------------------------------------------------------------
+# Free text from a single image. Nothing is stored: the image is transcribed and
+# dropped. Sync `def` routes on purpose, so the slow OCR/API call runs in the
+# threadpool instead of blocking the event loop for every other user.
+
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff")
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+
+@app.get("/api/ocr/options")
+def ocr_options():
+    return {"engines": image_ocr.engines(), "languages": image_ocr.languages()}
+
+
+@app.post("/api/ocr")
+def ocr_image(
+    file: UploadFile = File(...),
+    engine: str = Form("claude"),
+    language: str = Form("auto"),
+):
+    if not (file.filename or "").lower().endswith(IMAGE_SUFFIXES):
+        raise HTTPException(400, "Upload a PNG, JPG, WEBP, GIF, BMP or TIFF image.")
+    data = file.file.read(MAX_IMAGE_BYTES + 1)
+    if len(data) > MAX_IMAGE_BYTES:
+        raise HTTPException(413, f"That image is larger than "
+                                 f"{MAX_IMAGE_BYTES // (1024 * 1024)}MB.")
+    try:
+        return image_ocr.transcribe(data, engine, language)
+    except image_ocr.OCRError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.get("/api/export.xlsx")

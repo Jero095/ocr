@@ -900,3 +900,152 @@ async function reparse(region) {
 
 $("pick-region").onclick = () => (pdfView.picking ? stopRegionPick() : startRegionPick());
 $("clear-region").onclick = () => reparse(null);
+
+/* ---------- navbar ---------- */
+
+// Hash routing keeps it one page: the statement viewer keeps its state while the
+// OCR view is open, and a reload lands back on the same section.
+function showView() {
+  const view = location.hash === "#ocr" ? "ocr" : "statements";
+  $("statements-view").hidden = view !== "statements";
+  $("ocr-view").hidden = view !== "ocr";
+  $("export-all").style.visibility = view === "statements" ? "" : "hidden";
+  document.querySelectorAll(".nav-link").forEach((a) =>
+    a.classList.toggle("active", a.dataset.view === view)
+  );
+  if (view === "ocr") loadOcrOptions();
+}
+window.addEventListener("hashchange", showView);
+
+/* ---------- simple OCR ---------- */
+
+// One image in, plain text out. Nothing is stored server-side.
+const ocr = { file: null, options: null, previewUrl: null };
+
+function remember(key, value) {
+  try { localStorage.setItem(key, value); } catch {}
+}
+function recall(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+async function loadOcrOptions() {
+  if (ocr.options) return;
+  const res = await api("/api/ocr/options").catch(() => null);
+  if (!res) return;
+  ocr.options = await res.json();
+
+  const lang = $("ocr-language");
+  lang.innerHTML = "";
+  for (const l of ocr.options.languages) lang.add(new Option(l.label, l.code));
+  lang.value = recall("ocr-language") || "auto";
+
+  const eng = $("ocr-engine");
+  eng.innerHTML = "";
+  for (const e of ocr.options.engines) {
+    const opt = new Option(e.label + (e.available ? "" : " - unavailable"), e.id);
+    opt.disabled = !e.available;
+    eng.add(opt);
+  }
+  const saved = ocr.options.engines.find((e) => e.id === recall("ocr-engine") && e.available);
+  const first = ocr.options.engines.find((e) => e.available);
+  eng.value = (saved || first || ocr.options.engines[0]).id;
+  renderEngineNote();
+  updateOcrButtons();
+}
+
+function renderEngineNote() {
+  const e = ocr.options?.engines.find((x) => x.id === $("ocr-engine").value);
+  const unavailable = (ocr.options?.engines || [])
+    .filter((x) => !x.available)
+    .map((x) => `${x.label}: ${x.reason}`);
+  const lines = [];
+  if (e && !e.local) lines.push("The image is sent to the Anthropic API to be read.");
+  if (e && e.local) lines.push("Runs on this machine. Weak on handwriting.");
+  $("ocr-engine-note").textContent = [...lines, ...unavailable].join(" ");
+}
+
+function updateOcrButtons() {
+  const engineOk = ocr.options?.engines.some((e) => e.id === $("ocr-engine").value && e.available);
+  $("ocr-run").disabled = !(ocr.file && engineOk);
+  $("ocr-copy").disabled = !$("ocr-text").value.trim();
+}
+
+function setOcrFile(file) {
+  if (!file) return;
+  if (!file.type.startsWith("image/")) {
+    toast(`${file.name || "That file"} is not an image`);
+    return;
+  }
+  ocr.file = file;
+  if (ocr.previewUrl) URL.revokeObjectURL(ocr.previewUrl);
+  ocr.previewUrl = URL.createObjectURL(file);
+  $("ocr-preview").src = ocr.previewUrl;
+  $("ocr-preview").hidden = false;
+  $("ocr-drop-text").hidden = true;
+  updateOcrButtons();
+}
+
+async function runOcr() {
+  if (!ocr.file) return;
+  const btn = $("ocr-run");
+  btn.disabled = true;
+  btn.textContent = "Reading...";
+  $("ocr-note").textContent = "";
+  const form = new FormData();
+  // Pasted images arrive without a name; the server checks the extension.
+  const name = ocr.file.name || `pasted.${(ocr.file.type.split("/")[1] || "png")}`;
+  form.append("file", ocr.file, name);
+  form.append("engine", $("ocr-engine").value);
+  form.append("language", $("ocr-language").value);
+  try {
+    const res = await api("/api/ocr", { method: "POST", body: form });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      $("ocr-note").textContent = body.detail || `Failed (${res.status})`;
+      toast("OCR failed");
+      return;
+    }
+    $("ocr-text").value = body.text;
+    $("ocr-note").textContent = body.note || "";
+  } catch (err) {
+    if (err.message !== "signed out") $("ocr-note").textContent = `Failed: ${err.message}`;
+  } finally {
+    btn.textContent = "Extract text";
+    updateOcrButtons();
+  }
+}
+
+const ocrDrop = $("ocr-drop");
+["dragenter", "dragover"].forEach((ev) =>
+  ocrDrop.addEventListener(ev, (e) => { e.preventDefault(); ocrDrop.classList.add("over"); })
+);
+["dragleave", "drop"].forEach((ev) =>
+  ocrDrop.addEventListener(ev, (e) => { e.preventDefault(); ocrDrop.classList.remove("over"); })
+);
+ocrDrop.addEventListener("drop", (e) => setOcrFile(e.dataTransfer.files[0]));
+ocrDrop.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("ocr-file").click(); }
+});
+$("ocr-file").onchange = (e) => { setOcrFile(e.target.files[0]); e.target.value = ""; };
+
+// Paste a screenshot straight from the clipboard while the OCR view is open.
+document.addEventListener("paste", (e) => {
+  if ($("ocr-view").hidden) return;
+  const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith("image/"));
+  if (!item) return;
+  e.preventDefault();
+  setOcrFile(item.getAsFile());
+});
+
+$("ocr-language").onchange = (e) => remember("ocr-language", e.target.value);
+$("ocr-engine").onchange = (e) => {
+  remember("ocr-engine", e.target.value);
+  renderEngineNote();
+  updateOcrButtons();
+};
+$("ocr-run").onclick = runOcr;
+$("ocr-text").oninput = updateOcrButtons;
+$("ocr-copy").onclick = () => copy($("ocr-text").value, "Text");
+
+showView();

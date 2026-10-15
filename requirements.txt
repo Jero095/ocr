@@ -7,3 +7,5 @@ openpyxl==3.1.5
 #   winget install UB-Mannheim.TesseractOCR   (Windows)
 #   apt install tesseract-ocr                 (Debian/Ubuntu)
 pytesseract==0.3.13
+# Simple OCR's handwriting engine (Claude vision). Needs ANTHROPIC_API_KEY.
+anthropic==1.14.0
