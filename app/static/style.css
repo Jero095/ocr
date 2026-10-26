@@ -382,6 +382,55 @@ td.flash { background: color-mix(in srgb, var(--ok) 25%, transparent); }
 
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
+/* ---------- loading screen ---------- */
+
+.busy {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: color-mix(in srgb, var(--bg) 78%, transparent);
+  backdrop-filter: blur(3px);
+}
+.busy[hidden] { display: none; }
+
+.busy-card {
+  width: min(420px, 100%);
+  padding: 28px 24px;
+  text-align: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 16px 48px #0005;
+}
+.busy-card p { margin: 0; }
+
+.busy-spinner {
+  width: 34px;
+  height: 34px;
+  margin: 0 auto 16px;
+  border-radius: 50%;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.busy-title { font-weight: 600; overflow-wrap: anywhere; }
+.busy-elapsed {
+  margin-top: 4px !important;
+  font: 22px/1.4 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+.busy-note { margin-top: 10px !important; font-size: 13px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .busy-spinner { animation: pulse 1.6s ease-in-out infinite; }
+}
+
 @media (max-width: 900px) {
   .layout { grid-template-columns: 1fr; }
   .sidebar { border-right: none; border-bottom: 1px solid var(--border); }
@@ -629,6 +678,12 @@ td.editable:focus {
   padding: 0 0 8px;
   font-size: 12px;
 }
+.pdf-nav { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+.pdf-nav[hidden] { display: none; }
+.pdf-nav .btn { padding: 3px 11px; font-size: 16px; line-height: 1.2; }
+.pdf-nav .btn:disabled { opacity: .4; cursor: default; }
+.pdf-nav .btn:disabled:hover { border-color: var(--border); background: transparent; }
+#pdf-pager { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .pdf-canvas-wrap { position: relative; overflow: auto; flex: 1; }
 .pdf-canvas-wrap canvas { display: block; }
 

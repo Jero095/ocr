@@ -24,6 +24,55 @@ function toast(msg) {
   toast._t = setTimeout(() => el.classList.remove("show"), 1600);
 }
 
+// Loading screen for requests that can wait on the Claude API (a scan read
+// through the vision fallback takes about a minute). The browser cannot see
+// which stage the server is in, so it shows a live elapsed time and says what
+// may be happening, rather than a progress bar it would have to invent.
+const busy = {
+  SHOW_AFTER_MS: 400, // fast requests (most CSVs) finish before this and never flash it
+  SLOW_AFTER_S: 90,
+  start(title, note) {
+    clearTimeout(this._show);
+    clearInterval(this._tick);
+    const began = Date.now();
+    $("busy-title").textContent = title;
+    $("busy-note").textContent = note;
+    $("busy-elapsed").textContent = "0:00";
+    this._show = setTimeout(() => {
+      this._focus = document.activeElement;
+      this._behind(true);
+      $("busy").hidden = false;
+      $("busy").querySelector(".busy-card").focus();
+    }, this.SHOW_AFTER_MS);
+    this._tick = setInterval(() => {
+      const s = Math.floor((Date.now() - began) / 1000);
+      $("busy-elapsed").textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+      if (s === this.SLOW_AFTER_S) {
+        $("busy-note").textContent =
+          "Still working. A long or hard-to-read statement can take a few minutes.";
+      }
+    }, 1000);
+  },
+  stop() {
+    clearTimeout(this._show);
+    clearInterval(this._tick);
+    $("busy").hidden = true;
+    this._behind(false);
+    this._focus?.focus?.();
+    this._focus = null;
+  },
+  // A modal must not let Tab or a click reach the page behind it.
+  _behind(blocked) {
+    for (const el of document.body.children) {
+      if (el.id !== "busy" && el.id !== "toast" && el.tagName !== "SCRIPT") el.inert = blocked;
+    }
+  },
+};
+
+const SCAN_NOTE =
+  "Scanned statements are read with OCR first. If the figures do not reconcile, " +
+  "Claude reads the page instead - that usually takes about a minute.";
+
 async function copy(text, label) {
   try {
     await navigator.clipboard.writeText(text);
@@ -52,7 +101,8 @@ const active = () => state.statements.find((s) => s.id === state.activeId);
 /* ---------- upload ---------- */
 
 async function upload(files) {
-  for (const file of files) {
+  files = [...files];
+  for (const [n, file] of files.entries()) {
     if (!/\.(pdf|csv|tsv|txt)$/i.test(file.name)) {
       toast(`${file.name} is not a PDF, CSV or TSV`);
       continue;
@@ -65,6 +115,10 @@ async function upload(files) {
     const body = new FormData();
     body.append("file", file);
 
+    busy.start(
+      `Reading ${file.name}` + (files.length > 1 ? ` (${n + 1} of ${files.length})` : ""),
+      /\.pdf$/i.test(file.name) ? SCAN_NOTE : "Reading the file…"
+    );
     try {
       const res = await api("/api/statements", { method: "POST", body });
       const data = await res.json();
@@ -79,6 +133,8 @@ async function upload(files) {
     } catch {
       state.statements.splice(state.statements.indexOf(placeholder), 1);
       toast("Upload failed - is the server running?");
+    } finally {
+      busy.stop();
     }
     renderList();
     renderViewer();
@@ -732,13 +788,11 @@ async function openPdfViewer(s) {
     frame.hidden = false;
     frame.src = `/api/statements/${s.id}/pdf`;
     $("pick-region").hidden = true;
-    $("clear-region").hidden = true;
-    $("pdf-pager").textContent = "";
+    for (const id of ["read-page", "read-all", "retry-vision", "pdf-nav"]) $(id).hidden = true;
     return;
   }
 
   $("pick-region").hidden = false;
-  $("clear-region").hidden = !s.region;
   frame.hidden = true;
   frame.removeAttribute("src");
   wrap.hidden = false;
@@ -790,12 +844,52 @@ async function drawPdfPage(s) {
   // flight rather than let the newer call throw into the fallback path.
   await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
 
-  $("pdf-pager").textContent =
-    pdfView.doc.numPages > 1 ? `Page ${pdfView.page} of ${pdfView.doc.numPages}` : "";
+  const pages = pdfView.doc.numPages;
+  $("pdf-nav").hidden = pages <= 1;
+  $("pdf-pager").textContent = `Page ${pdfView.page} of ${pages}`;
+  $("pdf-prev").disabled = pdfView.page <= 1;
+  $("pdf-next").disabled = pdfView.page >= pages;
+  updateReadButtons(s, pages);
 
   overlay.innerHTML = "";
   if (s.region && s.region.page === pdfView.page - 1) drawSavedRegion(s.region);
 }
+
+// Which re-read buttons apply. On a multi-page PDF, "Read whole page" reads the
+// page being viewed and "Read all pages" reads the document, as an upload does.
+// On a single page they would be the same thing, so "Read whole page" only
+// appears to undo a drawn region. A failed vision read gets its own retry.
+function updateReadButtons(s, pages) {
+  const multi = pages > 1;
+  $("read-page").hidden = !(multi || s.region);
+  $("read-all").hidden = !multi;
+  $("retry-vision").hidden = !s.vision_error;
+}
+
+// The whole of the page being viewed, as a region: the server's crop keeps
+// every word on it, and the failsafe still checks the whole statement.
+function wholePageRegion() {
+  return { page: pdfView.page - 1, x0: 0, y0: 0, x1: 1, y1: 1 };
+}
+
+$("read-page").onclick = () =>
+  reparse(pdfView.doc && pdfView.doc.numPages > 1 ? wholePageRegion() : null);
+$("read-all").onclick = () => reparse(null);
+$("retry-vision").onclick = () => reparse(null);
+
+// Turning the page also moves where a region is drawn: startRegionPick reads
+// pdfView.page when the box is finished, so a table on page 2 can be selected.
+function goToPage(delta) {
+  const s = active();
+  if (!s || !pdfView.doc) return;
+  const target = pdfView.page + delta;
+  if (target < 1 || target > pdfView.doc.numPages) return;
+  pdfView.page = target;
+  renderPdfPage(s);
+}
+
+$("pdf-prev").onclick = () => goToPage(-1);
+$("pdf-next").onclick = () => goToPage(1);
 
 function drawSavedRegion(r) {
   const box = document.createElement("div");
@@ -877,12 +971,29 @@ async function reparse(region) {
   if (s.edited && !confirm("Re-reading replaces the table and discards your edits. Continue?")) {
     return;
   }
-  toast(region ? "Reading the selected region…" : "Reading the whole page…");
-  const res = await api(`/api/statements/${s.id}/reparse`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ region }),
-  });
+  const wholePage = region && region.x0 === 0 && region.y0 === 0 && region.x1 === 1 && region.y1 === 1;
+  busy.start(
+    wholePage ? `Reading page ${region.page + 1}`
+      : region ? "Reading the selected region"
+      : s.vision_error ? "Reading again with Claude"
+      : "Reading all pages",
+    wholePage ? "Only this page is read; the failsafe still checks the whole statement."
+      : region ? "Only the box you drew is read; the failsafe still checks the whole statement."
+      : SCAN_NOTE
+  );
+  let res;
+  try {
+    res = await api(`/api/statements/${s.id}/reparse`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ region }),
+    });
+  } catch {
+    toast("Re-read failed - is the server running?");
+    return;
+  } finally {
+    busy.stop();
+  }
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     toast(data.detail || "Could not re-read that file");
@@ -899,7 +1010,6 @@ async function reparse(region) {
 }
 
 $("pick-region").onclick = () => (pdfView.picking ? stopRegionPick() : startRegionPick());
-$("clear-region").onclick = () => reparse(null);
 
 /* ---------- navbar ---------- */
 

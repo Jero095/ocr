@@ -83,8 +83,14 @@
           <div class="pane pdf-pane" id="pdf-pane" hidden>
             <div class="pdf-bar">
               <button id="pick-region" class="btn ghost">Select region</button>
-              <button id="clear-region" class="btn ghost" hidden>Read whole page</button>
-              <span id="pdf-pager" class="muted"></span>
+              <button id="read-page" class="btn ghost" hidden>Read whole page</button>
+              <button id="read-all" class="btn ghost" hidden>Read all pages</button>
+              <button id="retry-vision" class="btn ghost" hidden>Read again with Claude</button>
+              <span id="pdf-nav" class="pdf-nav" hidden>
+                <button id="pdf-prev" class="btn ghost" aria-label="Previous page">&lsaquo;</button>
+                <span id="pdf-pager" class="muted" aria-live="polite"></span>
+                <button id="pdf-next" class="btn ghost" aria-label="Next page">&rsaquo;</button>
+              </span>
               <span id="region-hint" class="muted" hidden>
                 Drag a box around the table.
               </span>
@@ -161,6 +167,16 @@
     </div>
     <div id="slip-list" class="slip-list"></div>
   </main>
+
+  <div id="busy" class="busy" hidden role="alertdialog" aria-modal="true"
+       aria-labelledby="busy-title" aria-describedby="busy-note">
+    <div class="busy-card" tabindex="-1">
+      <div class="busy-spinner" aria-hidden="true"></div>
+      <p id="busy-title" class="busy-title"></p>
+      <p id="busy-elapsed" class="busy-elapsed">0:00</p>
+      <p id="busy-note" class="busy-note muted"></p>
+    </div>
+  </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/vendor/pdf.min.js"></script>
