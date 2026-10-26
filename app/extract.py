@@ -39,7 +39,7 @@ from dataclasses import dataclass, field, asdict
 
 import pdfplumber
 
-from . import ocr
+from . import ocr, vision
 
 # --- geometry tunables -------------------------------------------------------
 # Words within this distance on the row axis belong to the same line.
@@ -59,6 +59,19 @@ MERGE_GAP = 4.0
 # ratio, not a distance in points, and it is deliberately separate from
 # BAND_GAP - see _merge_header_bands for why neither could be avoided.
 HEADER_MERGE_RATIO = 1.5
+
+# Minimum gap, in points, at which a digit/letter boundary inside one word is
+# treated as two words. Measured: 0 boundaries fall between 0.5 and 1.5pt; see
+# _split_fused.
+SPLIT_GAP = 1.0
+# A second table joins the first only when it shares at least this many column
+# labels, the commission one included. Measured 5 (Regence, must join) against 2
+# (FARMERS-ALLIANCE agent recap, must not). See _extend_across_pages.
+SIBLING_MIN_SHARED = 3
+
+# What must end the text before such a cut: an amount (68.00) or a date (09/2026,
+# 01/01/2026). See _split_fused.
+_FIGURE_END = re.compile(r"(?:\d\.\d{2}|\d{1,2}/\d{4}|\d{1,2}/\d{1,2}/\d{2,4})$")
 
 
 @dataclass(frozen=True)
@@ -132,7 +145,8 @@ _CANONICAL_PATTERNS: list[tuple[str, list[str]]] = [
         # Payment columns first. Several carriers print commission *earned*
         # alongside what is actually paid this statement, and the declared total
         # is the payment: US Risk earns 1,696.15 but pays 961.02.
-        r"current\s*pmt", r"pay\s*amt", r"net\s*pay", r"check\s*amount",
+        # "Pay Amount" (Regence) beside "Prem Amount" and "Retro Adj".
+        r"current\s*pmt", r"pay\s*amt", r"^pay\s*amount$", r"net\s*pay", r"check\s*amount",
         # "Amount Paid" (Heacock). The reversed forms below - paid\s*amount,
         # amt\.?\s*paid - do not match this word order.
         r"amount\s*paid",
@@ -224,6 +238,9 @@ class Statement:
     # The box the user drew to restrict table detection, as fractions of a page.
     # Stored so it survives a restart and can be shown again over the PDF.
     region: dict | None = None
+    # Why the vision fallback failed on this scan, when it did. Non-empty means
+    # the table shown is the OCR read and a re-read is worth offering.
+    vision_error: str = ""
 
     @property
     def canonical(self) -> dict[str, str]:
@@ -246,6 +263,7 @@ class Statement:
             "cleanup": self.cleanup,
             "delimiter": self.delimiter,
             "region": self.region,
+            "vision_error": self.vision_error,
         }
 
     def to_tsv(self) -> str:
@@ -318,6 +336,60 @@ def _merge_spans(spans: list[tuple[float, float]], gap: float):
         else:
             merged.append([lo, hi])
     return [(lo, hi) for lo, hi in merged]
+
+
+def _split_fused(words: list[dict]) -> list[dict]:
+    """Split words pdfplumber joined across a real gap between a number and text.
+
+    extract_words merges characters closer than x_tolerance (3pt). Regence sets
+    its pay amount and pay type exactly 3.0pt apart, so "68.00" and "COMM" came
+    back as one word "68.00COMM": the amount fell into the Pay Type column and
+    Pay Amount held only the "$". Lowering x_tolerance globally would re-split
+    every carrier, so the split is targeted instead: only where a digit meets a
+    letter (either order) *and* the glyphs are visibly apart.
+
+    Measured over every text PDF in statements/, at digit/letter boundaries
+    inside a word:
+
+        glyphs touching (< 0.5pt)   195   ID00756, G0227406 - real tokens
+        0.5 - 1.5pt                   0
+        >= 1.5pt                     39   68.00COMM, 6750Mercy, NE68106
+
+    SPLIT_GAP sits in the empty range, so a policy number like G0227406 is
+    never cut. The gap alone is not enough, though: Polomar prints every word
+    2.2pt apart with no spaces at all ("PIAResEQCommissionApr26", "Page1of1"),
+    and cutting those moved its layout from match to no_amounts. So a cut also
+    needs a *complete* figure before it - an amount ("68.00|COMM") or a date
+    ("09/2026|Medical") - followed by a letter. Needs
+    extract_words(return_chars=True); the chars are dropped.
+    """
+    out: list[dict] = []
+    for w in words:
+        chars = w.pop("chars", None)
+        if not chars or len(chars) < 2:
+            out.append(w)
+            continue
+        text = "".join(c["text"] for c in chars)
+        cuts = [
+            i for i in range(1, len(chars))
+            if chars[i]["x0"] - chars[i - 1]["x1"] >= SPLIT_GAP
+            and chars[i]["text"].isalpha()
+            and _FIGURE_END.search(text[:i])
+        ]
+        if not cuts:
+            out.append(w)
+            continue
+        for lo, hi in zip([0] + cuts, cuts + [len(chars)]):
+            part = chars[lo:hi]
+            out.append({
+                **w,
+                "text": "".join(c["text"] for c in part),
+                "x0": part[0]["x0"],
+                "x1": part[-1]["x1"],
+                "top": min(c["top"] for c in part),
+                "bottom": max(c["bottom"] for c in part),
+            })
+    return out
 
 
 def _lines(words, rotated: bool) -> list[list[dict]]:
@@ -428,6 +500,33 @@ def _columns(band: list[dict], rotated: bool):
     return names, extents
 
 
+def _grid_columns(band: list[dict], rules: list[float], rotated: bool):
+    """Column names and extents taken from printed rules instead of header words.
+
+    _columns has only the header to go on: its extents are wherever the header
+    words happen to sit, merged within MERGE_GAP. When the page prints its grid,
+    the rules are the carrier's own statement of where each column starts and
+    ends, so the extents here are the gaps between consecutive rules and the
+    header words only supply the names.
+
+    A gap holding no header word is a box or border rather than a column, and is
+    dropped. This only proposes a candidate: _auto_detect scores it against the
+    header-derived columns and keeps whichever fits the rows beneath better.
+    """
+    names, extents = [], []
+    for lo, hi in zip(rules, rules[1:]):
+        members = [
+            w for w in band if lo <= sum(_span(w, rotated)) / 2 <= hi
+        ]
+        if not members:
+            continue
+        members.sort(key=lambda w: (_row_axis(w, rotated), _span(w, rotated)[0]))
+        name = " ".join(_text(w, rotated) for w in members)
+        names.append(name.replace("*", "").strip())
+        extents.append((lo, hi))
+    return names, extents
+
+
 def _cells(line: list[dict], names, extents, rotated: bool) -> dict[str, str]:
     """Assign a line's words to columns by maximum interval overlap.
 
@@ -507,25 +606,147 @@ def parse_pdf(path: str, filename: str, region: dict | None = None) -> Statement
     declared total the failsafe reconciles against survives a crop. Losing that
     reference at the exact moment the user is steering the parse by hand would
     be the worst possible time to lose it.
+
+    A scan whose figures do not reconcile is then offered to the vision fallback
+    (app/vision.py). Not when a region was drawn: that is the user steering the
+    geometry engine by hand, and a re-parse should answer to their box.
     """
+    stmt, pages, scanned = _parse_geometry(path, filename, region)
+    if scanned and region is None and not (stmt.payout and stmt.payout.ok):
+        return _vision_fallback(path, stmt, pages)
+    return stmt
+
+
+# How good a failsafe verdict is, for choosing between the geometry and vision
+# reads of one scan. `no_reference` and `mismatch` share a rank: both carry
+# figures, and neither is verified.
+_VERDICT_RANK = {"match": 2, "no_reference": 1, "mismatch": 1, "no_amounts": 0}
+
+
+def _vision_fallback(path: str, geometry: Statement, pages) -> Statement:
+    """Let Claude read a scan the geometry engine could not reconcile.
+
+    The result goes through _finalise against the same OCR page text as the
+    geometry read, so both are judged by identical references, none of which
+    Claude produced (see app/vision.py). The vision read is kept when its verdict
+    ranks at least as well; a tie goes to vision, because this only runs once
+    the geometry read has already failed to reconcile.
+    """
+    # Either way the table that follows is the OCR read, whose headers and
+    # figures are often misread on a scan. Said first, not last: a quiet note at
+    # the foot of the warnings left a garbled header looking like a finished
+    # extraction.
+    ok, reason = vision.available()
+    if not ok:
+        geometry.warnings.insert(
+            0,
+            "This table is the OCR read, whose headers and figures are often "
+            f"misread on scans. A vision read could replace it, but: {reason}",
+        )
+        return geometry
+    try:
+        table = vision.read_table(path)
+    except vision.VisionError as exc:
+        geometry.vision_error = str(exc)
+        geometry.warnings.insert(
+            0,
+            f"Vision read failed ({exc}). This table is the OCR read, whose "
+            "headers and figures are often misread on scans. Use \"Read again "
+            "with Claude\" to retry.",
+        )
+        return geometry
+
+    columns, data, total_rows, problems = vision.to_rows(table)
+    stmt = Statement(filename=geometry.filename)
+    stmt.template = f"{carrier_from_filename(geometry.filename)} (vision)"
+    stmt.columns, stmt.rows = columns, data
+
+    grand = [r for r in total_rows if r["_kind"] == "total"]
+    groups = [{k: v for k, v in r.items() if k != "_kind"} for r in total_rows]
+    if grand:
+        stmt.totals = {k: v for k, v in grand[-1].items() if k != "_kind"}
+        stmt.subtotals = [g for g in groups if g != stmt.totals]
+    else:
+        stmt.subtotals = groups
+
+    # Each statement in the file closes with its own grand total, so the rows
+    # are checked against the sum of every "total" row. A line wrongly labelled
+    # "total" inflates that sum and fails the check - the safe direction.
+    for col in columns:
+        stated = [to_float(r.get(col, "")) for r in grand]
+        stated = [v for v in stated if v is not None]
+        values = [to_float(r.get(col, "")) for r in data]
+        values = [v for v in values if v is not None]
+        if stated and values:
+            stmt.checks.append(Check(col, round(sum(values), 2), round(sum(stated), 2)))
+
+    stmt.warnings.append(
+        f"Read by {table['model']} (vision fallback), because the OCR geometry "
+        f"read did not reconcile ({geometry.payout.status if geometry.payout else 'no verdict'}). "
+        "The figures are still checked against the filename and the statement "
+        "text, independently of the model."
+    )
+    if table.get("statements", 1) > 1:
+        stmt.warnings.append(
+            f"This file holds {table['statements']} separate statements. The "
+            "rows of all of them are exported together, so the failsafe can only "
+            "reconcile against a filename amount that covers them all."
+        )
+    for note in table.get("uncertain", []):
+        stmt.warnings.append(f"Vision read uncertain: {note}")
+    if problems:
+        stmt.warnings.append(
+            "Vision rows left out because their cells did not line up with the "
+            f"columns: {'; '.join(problems)}."
+        )
+    if stmt.checks and not all(c.ok for c in stmt.checks):
+        stmt.warnings.append(
+            "Vision-read rows do not add up to the printed totals. Review before use."
+        )
+    _finalise(stmt, pages)
+
+    rank = _VERDICT_RANK.get
+    if rank(stmt.payout.status, 0) >= rank(geometry.payout.status if geometry.payout else "no_amounts", 0):
+        return stmt
+    geometry.warnings.append(
+        f"A vision read was tried but reconciled no better ({stmt.payout.status})."
+    )
+    return geometry
+
+
+def _parse_geometry(path: str, filename: str, region: dict | None):
+    """The geometry engine: (statement, page lines, whether any page was OCR'd)."""
     stmt = Statement(filename=filename)
+    scanned = False
 
     # Rotation is per page: a statement can mix a rotated table page with an
     # unrotated cover or address page, so each page is grouped independently.
     pages: list[tuple[list[list[dict]], bool]] = []
     table_pages: list[tuple[list[list[dict]], bool]] = []
+    # Printed vertical rules per page, aligned with table_pages. Only scans have
+    # them today (see ocr.column_rules); a text page contributes an empty list.
+    grids: list[list[float]] = []
     ocr_notes: list[str] = []
     cropped_from = 0
     with pdfplumber.open(path) as pdf:
         for index, page in enumerate(pdf.pages):
             rotated = (page.rotation or 0) % 360 == 180
-            words = page.extract_words()
+            words = page.extract_words(return_chars=True)
+            if rotated:
+                # A 180-degree page stores its characters in reverse along the
+                # other axis; the split above is measured on upright pages only.
+                for w in words:
+                    w.pop("chars", None)
+            else:
+                words = _split_fused(words)
             extent = (float(page.width), float(page.height))
+            rules: list[float] = []
             if not words:
                 # No text layer on this page - an image-only scan. OCR returns the
                 # same word dicts in PDF points, already turned visually upright,
                 # so the span axis is the plain one and rotated stays False.
-                words, note = ocr.page_words(page)
+                words, note, rules = ocr.page_words(page)
+                scanned = True
                 if note:
                     ocr_notes.append(f"Page {page.page_number}: {note}")
                 if words:
@@ -539,6 +760,7 @@ def parse_pdf(path: str, filename: str, region: dict | None = None) -> Statement
                     )
 
             pages.append((_lines(words, rotated), rotated))
+            grids.append(rules)
 
             if region and region.get("page", 0) == index:
                 kept = _crop(words, region, extent, rotated)
@@ -581,16 +803,16 @@ def parse_pdf(path: str, filename: str, region: dict | None = None) -> Statement
                 + ("read nothing legible from it." if available else reason)
             )
             _finalise(stmt, pages)
-            return stmt
+            return stmt, pages, scanned
 
-        auto = _auto_detect(table_pages)
+        auto = _auto_detect(table_pages, grids, page_furniture(pages))
         if auto is None:
             stmt.warnings.append(
                 "Has a text layer but no table could be located. Needs a "
                 "template in extract.py, or the LLM fallback."
             )
             _finalise(stmt, pages)
-            return stmt
+            return stmt, pages, scanned
 
         names, rows, totals, subs, checks = auto
         stmt.template = f"{carrier_from_filename(filename)} (auto-detected)"
@@ -607,7 +829,7 @@ def parse_pdf(path: str, filename: str, region: dict | None = None) -> Statement
                 "totals. Review before use."
             )
         _finalise(stmt, pages)
-        return stmt
+        return stmt, pages, scanned
 
     template, band, lines, rotated = found
     stmt.template = template.name
@@ -650,7 +872,7 @@ def parse_pdf(path: str, filename: str, region: dict | None = None) -> Statement
         # A template's header tokens can appear in an unrelated carrier's header
         # (Amwins' header contains all of Chris Leef's tokens). A match that
         # yields no rows is a false positive, so fall through to auto-detection.
-        auto = _auto_detect(table_pages)
+        auto = _auto_detect(table_pages, grids, page_furniture(pages))
         if auto is not None:
             names, rows, totals, subs, checks = auto
             stmt.template = f"{carrier_from_filename(filename)} (auto-detected)"
@@ -667,14 +889,14 @@ def parse_pdf(path: str, filename: str, region: dict | None = None) -> Statement
                     "totals. Review before use."
                 )
             _finalise(stmt, pages)
-            return stmt
+            return stmt, pages, scanned
         stmt.warnings.append(
             f"Recognised the {template.name} header but matched no data rows."
         )
 
     _validate(stmt, template)
     _finalise(stmt, pages)
-    return stmt
+    return stmt, pages, scanned
 
 
 def _validate(stmt: Statement, template: Template) -> None:
@@ -829,7 +1051,14 @@ def _looks_like_header(band: list[dict], rotated: bool) -> bool:
         return False
     # A header is labels, not figures.
     numeric = sum(1 for t in texts if to_float(t) is not None)
-    return numeric <= len(texts) // 3
+    if numeric > len(texts) // 3:
+        return False
+    # "Total for Writing Producer 17305165 Nield, Tonya: $ 162.00" (Regence) is
+    # mostly words, so it passed the test above and outscored the real header:
+    # it "reconciled" against the next section total. A totals line carries a
+    # money figure; a header that says "Total Premium" carries none.
+    joined = " ".join(texts)
+    return not (TOTAL_RE.search(joined) and re.search(r"\d\.\d{2}\b", joined))
 
 
 def _score(rows, totals, columns) -> tuple[int, int, list]:
@@ -846,15 +1075,154 @@ def _score(rows, totals, columns) -> tuple[int, int, list]:
     return sum(1 for c in checks if c.ok), len(rows), checks
 
 
-def _auto_detect(pages) -> tuple | None:
-    """Return the best (columns, rows, totals, subtotals, checks) or None."""
-    best = None
-    for lines, rotated in pages:
-        bands = _bands(lines, rotated)
-        for band in bands:
+def _candidates(band: list[dict], rules: list[float], rotated: bool):
+    """Column layouts worth scoring for one header band, as (kind, layout).
+
+    The header-derived layout always; the printed-rule layout too when the page
+    has a grid. Header first, so on a tie the long-standing path is kept.
+    """
+    yield "header", _columns(band, rotated)
+    if rules:
+        yield "grid", _grid_columns(band, rules, rotated)
+
+
+def _layout(kind: str, band: list[dict], rules: list[float], rotated: bool):
+    if kind == "grid" and rules:
+        return _grid_columns(band, rules, rotated)
+    return _columns(band, rotated)
+
+
+def _classify(cells: dict[str, str], names, rows: list, totals_rows: list) -> None:
+    """File one line's cells as a totals row or a data row (or neither)."""
+    joined = " ".join(cells.values())
+    if TOTAL_RE.search(joined):
+        label = ""
+        for key, value in cells.items():
+            if TOTAL_RE.search(value):
+                label = label or value
+                cells[key] = ""
+        cells[names[0]] = label
+        totals_rows.append(cells)
+    elif _looks_like_data(cells):
+        rows.append(cells)
+
+
+def _signature(band: list[dict], rotated: bool) -> frozenset:
+    return frozenset(_text(w, rotated).lower().strip(":*") for w in band)
+
+
+def _line_text(line: list[dict], rotated: bool) -> str:
+    return " ".join(_text(w, rotated) for w in line)
+
+
+def page_furniture(pages) -> frozenset[str]:
+    """Lines printed word for word on two or more pages.
+
+    A transaction is not repeated verbatim on another page; a running footer or
+    a repeated section heading is. Regence's "Date: 09/21/2026 8:06 PM Voucher#
+    17900387996370000" footer otherwise reads as a data row and its voucher
+    number lands in Pay Amount. Measured over the *whole* document, so reading a
+    single page still recognises its footer. Only rows are filtered by this -
+    a repeated header line must stay, it is what anchors each page's table.
+    """
+    seen: dict[str, set[int]] = {}
+    for index, (lines, rotated) in enumerate(pages):
+        for line in lines:
+            seen.setdefault(_line_text(line, rotated), set()).add(index)
+    return frozenset(text for text, on in seen.items() if len(on) > 1)
+
+
+def _extend_across_pages(pages, grids, winner, furniture: frozenset = frozenset()) -> tuple | None:
+    """Read every section of the winning table, on every page.
+
+    _auto_detect scores one header band and reads the lines beneath it on its
+    own page. Statements that run over several pages repeat the header on each
+    one, and some split the table into sections that each repeat it (Regence
+    prints a header per producer and per New Enrollment / Renewals block). A
+    single band therefore sees only its own page.
+
+    Every band that is the same header (identical token set) becomes an anchor,
+    and so does a *sibling* table: a different header whose commission column
+    carries the same label (Regence's Group Business table on page 3 has other
+    columns, but the same "Pay Amount"). Content, never position, decides that -
+    a letterhead cannot carry the payout column's label. Each anchor reads the
+    lines beneath it with its own column positions, up to the next anchor on
+    its page. Columns are the winner's, then any a sibling adds.
+
+    Returns (names, rows, totals_rows) or None when there is nothing to add.
+    """
+    kind, band0, page0, names0 = winner
+    sig0 = _signature(band0, pages[page0][1])
+    pay0 = infer_canonical(names0).get("Commission Amount", "")
+
+    anchors = []  # (page index, band, names, extents)
+    for index, ((lines, rotated), rules) in enumerate(zip(pages, grids)):
+        for band in _bands(lines, rotated):
             if not _looks_like_header(band, rotated):
                 continue
-            names, extents = _columns(band, rotated)
+            names, extents = _layout(kind, band, rules, rotated)
+            if len(names) < MIN_CELLS:
+                continue
+            same = _signature(band, rotated) == sig0
+            # A sibling repeats the transaction columns, not just the money: a
+            # recap by agent also carries "Commission Amount". Measured shared
+            # labels: Regence's Group vs Individual tables 5 (must join), the
+            # FARMERS-ALLIANCE agent recap vs its detail table 2 (must not -
+            # joining it double-counted the payout). At least 3 sits between.
+            sibling = (
+                bool(pay0)
+                and infer_canonical(names).get("Commission Amount") == pay0
+                and len(set(names) & set(names0)) >= SIBLING_MIN_SHARED
+            )
+            if same or sibling:
+                anchors.append((index, band, names, extents))
+
+    # The winner always finds itself, so one anchor means nothing to add.
+    if len(anchors) <= 1:
+        return None
+
+    columns = list(names0)
+    rows: list[dict] = []
+    totals_rows: list[dict] = []
+    for index, ((lines, rotated), _) in enumerate(zip(pages, grids)):
+        here = sorted(
+            (a for a in anchors if a[0] == index),
+            key=lambda a: min(_row_axis(w, rotated) for w in a[1]),
+        )
+        for n, (_, band, names, extents) in enumerate(here):
+            start = max(_row_axis(w, rotated) for w in band)
+            stop = (
+                min(_row_axis(w, rotated) for w in here[n + 1][1])
+                if n + 1 < len(here) else float("inf")
+            )
+            columns += [c for c in names if c not in columns]
+            for line in lines:
+                top = min(_row_axis(w, rotated) for w in line)
+                if not start < top < stop:
+                    continue
+                if _line_text(line, rotated) in furniture:
+                    continue
+                _classify(_cells(line, names, extents, rotated), names, rows, totals_rows)
+    return columns, rows, totals_rows
+
+
+def _auto_detect(pages, grids=None, furniture: frozenset = frozenset()) -> tuple | None:
+    """Return the best (columns, rows, totals, subtotals, checks) or None.
+
+    `grids` holds each page's printed vertical rules (empty when it has none),
+    aligned with `pages`. `furniture` is page_furniture() of the whole
+    document; those lines are never read as rows.
+    """
+    best = None
+    grids = grids or [[] for _ in pages]
+    for page_index, ((lines, rotated), rules) in enumerate(zip(pages, grids)):
+        bands = _bands(lines, rotated)
+        for band, kind, (names, extents) in (
+            (band, kind, layout)
+            for band in bands
+            if _looks_like_header(band, rotated)
+            for kind, layout in _candidates(band, rules, rotated)
+        ):
             if len(names) < MIN_CELLS:
                 continue
             band_end = max(_row_axis(w, rotated) for w in band)
@@ -863,6 +1231,8 @@ def _auto_detect(pages) -> tuple | None:
             hits = misses = fused = lines_below = 0
             for line in lines:
                 if min(_row_axis(w, rotated) for w in line) <= band_end:
+                    continue
+                if _line_text(line, rotated) in furniture:
                     continue
                 lines_below += 1
                 # Assign words by the same max-overlap rule _cells uses, but count
@@ -883,21 +1253,21 @@ def _auto_detect(pages) -> tuple | None:
                     if to_float(_text(w, rotated)) is not None:
                         numeric_per_column[at] = numeric_per_column.get(at, 0) + 1
                 fused += sum(1 for n in numeric_per_column.values() if n >= 2)
-                cells = _cells(line, names, extents, rotated)
-                joined = " ".join(cells.values())
-                if TOTAL_RE.search(joined):
-                    label = ""
-                    for key, value in cells.items():
-                        if TOTAL_RE.search(value):
-                            label = label or value
-                            cells[key] = ""
-                    cells[names[0]] = label
-                    totals_rows.append(cells)
-                elif _looks_like_data(cells):
-                    rows.append(cells)
+                _classify(_cells(line, names, extents, rotated), names, rows, totals_rows)
 
             if not rows:
                 continue
+
+            # Read the same table on its other pages and sections before it is
+            # scored, so every candidate is judged on all of its rows. Choosing
+            # on one page and extending afterwards let a 2-row Regence section
+            # that matched its own section total beat the 18-row table.
+            extended = _extend_across_pages(
+                pages, grids, (kind, band, page_index, names), furniture
+            )
+            if extended is not None and len(extended[1]) > len(rows):
+                names, rows, totals_rows = extended
+
             if not totals_rows:
                 # No row said "total" - the table may still close with an
                 # unlabelled producer subtotal. Only trusted if it reconciles.
@@ -936,7 +1306,8 @@ def _auto_detect(pages) -> tuple | None:
             alignment = hits / (hits + misses) if (hits + misses) else 0.0
             key = (passing, nrows, -round(fused_ratio * 10), round(alignment / 0.05))
             if best is None or key > best[0]:
-                best = (key, names, rows, totals, totals_rows[:-1], checks)
+                best = (key, names, rows, totals,
+                        [r for r in totals_rows if r is not totals], checks)
 
     if best is None:
         return None
@@ -959,6 +1330,8 @@ AMOUNT_RE = r"\(?-?\$?\s?[\d,]+\.\d{2}\)?"
 DECLARED_TOTAL_LABELS: list[str] = [
     r"check\s*total",
     r"total\s*payout",
+    # Regence's summary page: "Payment Amount $771.00" is the cheque itself.
+    r"payment\s*amount",
     r"net\s*amount",
     r"total\s*commission\s*paid(?:\s*to\s*agency)?",
     r"total\s*commission\s*amount",

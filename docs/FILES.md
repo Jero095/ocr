@@ -20,8 +20,10 @@ docs/
   DEPLOYMENT.md               architecture reference, Docker pipeline, Railway
 app/
   __init__.py                 marks app/ a package (empty)
-  extract.py    1163 lines    PDF geometry engine, templates, failsafe, Statement
-  ocr.py         226 lines    OCR for image-only scans -> word boxes in points
+  extract.py    1310 lines    PDF geometry engine, templates, failsafe, Statement
+  ocr.py         382 lines    OCR for image-only scans -> word boxes in points
+  vision.py      170 lines    Claude reads a scan's table when OCR does not reconcile
+  image_ocr.py   368 lines    Simple OCR tab and deposit slips (Claude / Tesseract)
   tabular.py     383 lines    CSV/TSV loading and cleaning
   store.py       669 lines    SQLite: statements, users, sessions, edits
   auth.py         96 lines    the gate: middleware, session cookies
@@ -115,13 +117,35 @@ dicts as `extract_words()`, so nothing downstream changes.
   Tesseract install explains itself instead of looking like a parse failure.
 - `_find_tesseract()` — PATH, then `TESSERACT_CMD`, then the standard Windows
   install paths (the installer does not always reach an open shell's PATH).
-- `page_words()` — rasterise, choose a rotation, OCR, scale pixels to points.
-  Returns a note describing DPI, rotation, word count and mean confidence, which
-  lands in `stmt.warnings` so the reader knows the figures came from OCR.
+- `page_words()` — rasterise, choose a rotation, level a tilted page, OCR, scale
+  pixels to points. Returns `(words, note, rules)`. The note describes DPI,
+  rotation, levelling, word count and mean confidence, and lands in
+  `stmt.warnings` so the reader knows the figures came from OCR.
+- `skew_angle()` — the small rotation that makes text rows sharpest, and how much
+  it helps. A page is levelled only when both clear `SKEW_MIN_ANGLE` and
+  `SKEW_MIN_GAIN`; a tilt beyond `LINE_TOL` splits and fuses rows.
+- `column_rules()` — x positions of printed vertical rules: thin ink with blank
+  paper either side. `extract._auto_detect` scores them as a second column layout
+  next to the header-derived one.
 - `_words()` — converts one `image_to_data` result, returning mean confidence and
   a discard count so rotations can be compared on measurement.
-- Constants: `RENDER_DPI`, `TESSERACT_CONFIG` (`--psm 6`), `MIN_CONF`. All
-  measured via `scripts/ocr_report.py`; the rationale is in the module docstring.
+- Constants: `RENDER_DPI`, `TESSERACT_CONFIG` (`--psm 6`), `MIN_CONF`, `RULE_*`,
+  `SKEW_*`. All measured; the numbers are in the comments beside them.
+
+## `app/vision.py` — the vision fallback
+
+Called from `extract.parse_pdf` when a scanned PDF's failsafe does not reach
+`match` and no region was drawn. Sends the PDF to Claude and turns its reading
+into a `Statement`; the failsafe then judges it against the same OCR text as the
+geometry read.
+
+- `read_table()` — one request: header labels verbatim, rows as cells aligned to
+  them, each row tagged `data` / `subtotal` / `total`. JSON-schema output.
+- `to_rows()` — rows whose cell count does not match the header are reported and
+  left out, never shifted into place.
+- `extract._vision_fallback()` — builds the `Statement`, checks data rows against
+  the sum of the `total` rows, runs `_finalise`, and keeps whichever read ranks
+  better (`_VERDICT_RANK`).
 
 ## `app/tabular.py` — delimited exports
 

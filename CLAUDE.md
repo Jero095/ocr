@@ -122,10 +122,45 @@ Three things it must keep doing:
    discards whole regions — on Heacock it missed both `$16.44` figures in the
    right-hand column. Measured 12/21 against 3's 10/21 with the filename amount
    as ground truth (`scripts/ocr_report.py`).
+4. **Level tilted pages before reading rows.** `LINE_TOL` is 3pt, and a 0.55°
+   tilt (FLATHEAD_SEPT) lifts one end of a 560pt row 5.4pt, splitting and
+   fusing rows. `skew_angle()` finds the rotation that makes text rows sharpest,
+   cross-checked against left/right row-profile correlation (0.55 vs 0.54). It
+   levels only when |angle| ≥ 0.25° **and** the gain ≥ 1.10: on a level page the
+   angle is noise (Gateway reports 0.40° at gain 1.03).
+5. **Printed rules are column boundaries.** `column_rules()` finds thin vertical
+   lines (ink in a 5px strip, blank 6px either side) - plain darkness fails on
+   black scan margins and dense text. Flathead's rules score 0.32-0.87, the best
+   non-rule 0.23. `_auto_detect` scores the rule layout as a *candidate* next to
+   the header layout, so a box or page border can never override a better fit.
 
-**OCR misreads digits, so the failsafe is what makes this safe to ship.** Four
-carriers currently extract figures that do not reconcile and are blocked from
-export. Never loosen the failsafe to make a scan pass.
+**OCR misreads digits, so the failsafe is what makes this safe to ship.** Scans
+whose figures do not reconcile are blocked from export. Never loosen the
+failsafe to make a scan pass.
+
+### Vision fallback (`app/vision.py`)
+
+When a scanned PDF's failsafe does not reach `match` (and no region was drawn),
+`parse_pdf` sends the PDF to Claude (`claude-opus-5-5`) and builds a second
+`Statement` from its reading. It is kept when its verdict ranks at least as well
+as the geometry read's. Needs `ANTHROPIC_API_KEY`; without it the geometry result
+stands and a warning says why. The statement leaves the machine.
+
+The line that keeps this safe: **Claude reads, code decides.**
+
+- Claude returns header labels **verbatim**, rows as cells aligned to them, and
+  a `data` / `subtotal` / `total` tag per row. It is never asked which column is
+  the commission: `infer_canonical()` decides from the printed labels, as for
+  any auto-detected layout.
+- The failsafe references are the filename amount and the totals in the **OCR**
+  text. Claude never sees the filename, so a misread that comes out
+  self-consistent still fails.
+- The prompt forbids adjusting a figure to make totals agree (same rule as the
+  deposit slips). Rows whose cell count does not match the header are dropped
+  and reported, never shifted into place.
+- A file can hold several statements (Flathead prints two agents per PDF), so
+  data rows are checked against the **sum** of the `total` rows. A line wrongly
+  tagged `total` inflates that sum and fails - the safe direction.
 
 ### Simple OCR (`app/image_ocr.py`)
 
@@ -175,6 +210,37 @@ it away. Amounts are strings and the check uses integer cents.
 - `_auto_detect()` — tries every plausible header band and keeps whichever table
   best reconciles against the statement's own totals. The arithmetic check *is*
   the layout chooser. This covers most carriers with no per-carrier code.
+
+**Every candidate is read across all pages before it is scored.**
+`_extend_across_pages()` turns every band with the same header (identical token
+set) into an anchor, plus any *sibling* table whose commission column carries the
+same label **and** that shares at least `SIBLING_MIN_SHARED` (3) column labels
+(Regence's Group Business table shares 5 with Individual Business and joins; the
+FARMERS-ALLIANCE agent recap shares 2 and must not - joining it double-counted
+the payout). Each anchor reads the lines beneath it with its own column positions,
+up to the next anchor; a sibling's extra columns are appended. Scoring before
+extending was tried and fails: a 2-row Regence section matched its own section
+total and beat the 18-row table, which matches the statement's 771.00.
+
+Three supporting rules, all content-based:
+
+- `page_furniture()` — a line printed word for word on two or more pages
+  (running footer, repeated section heading) is never a row. Measured on the
+  whole document, so a single-page read still recognises its footer.
+- `_looks_like_header()` rejects a band that says "total" **and** carries a money
+  figure. Headers can say "Total Premium"; they never carry `162.00`.
+- `_split_fused()` splits a word where a complete amount or date meets a letter
+  across a gap of at least `SPLIT_GAP` (1.0pt). pdfplumber merges glyphs closer
+  than 3pt, and Regence prints "68.00" and "COMM" exactly 3.0pt apart. Measured
+  over every text PDF: 195 digit/letter boundaries touch (< 0.5pt, real tokens
+  like `G0227406`), none fall in 0.5-1.5pt, 39 are ≥ 1.5pt. The figure-first
+  condition matters: Polomar prints every word 2.2pt apart with no spaces
+  (`PIAResEQCommissionApr26`), and cutting on the gap alone broke its match.
+
+The UI reads all pages on upload. "Read whole page" re-reads only the page
+being viewed (sent as a full-page region), "Read all pages" re-reads the
+document. A single page is a partial payout, so its failsafe correctly reports
+a mismatch.
 
 ### The failsafe (`_payout_check`)
 
@@ -328,7 +394,13 @@ Hand-written templates declare the mapping; auto-detected layouts have it
   commission column does not reconcile. Export is blocked, which is the failsafe
   working as designed — OCR misreads digits and these are the cases it caught.
   Improving them means better pre-processing (the scans carry fold lines) or a
-  hand-written template, **not** loosening the check.
+  hand-written template, **not** loosening the check. With the vision fallback,
+  **Flathead now reconciles** (937.91 against its filename, both in-table checks
+  passing). Without an API key the 22 scans read exactly as before.
+- **`FLATHEAD_SEPT.pdf` has no amount in its filename**, and its OCR text holds
+  no total label the failsafe recognises, so the vision read (both checks pass,
+  961.40 = 366.90 + 594.50 across its two agent statements) can only report
+  `no_reference`. Naming the file `FLATHEAD_SEPT 961.40.pdf` makes it verifiable.
 - **`ISC 58.65.pdf` reports 0 pages at 788KB** and cannot be opened by pdfplumber
   at all. This is a corrupt file, not an OCR case; it needs re-exporting from the
   carrier.
