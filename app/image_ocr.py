@@ -149,12 +149,22 @@ def _encode_for_claude(image: Image.Image) -> tuple[str, str]:
 
 def _call_claude(image: Image.Image, system: str, instruction: str, **extra):
     """One vision request. Every failure comes back as an OCRError for the UI."""
+    data, media_type = _encode_for_claude(image)
+    source = {"type": "base64", "media_type": media_type, "data": data}
+    return call_claude([{"type": "image", "source": source}], system, instruction, **extra)
+
+
+def call_claude(blocks: list[dict], system: str, instruction: str, **extra):
+    """One request with `blocks` (images or documents) ahead of the instruction.
+
+    Shared with app/vision.py, which sends a whole statement PDF rather than one
+    image. Every failure comes back as an OCRError for the UI.
+    """
     ok, reason = _claude_available()
     if not ok:
         raise OCRError(reason)
     import anthropic
 
-    data, media_type = _encode_for_claude(image)
     client = anthropic.Anthropic()
     try:
         response = client.beta.messages.create(
@@ -167,11 +177,7 @@ def _call_claude(image: Image.Image, system: str, instruction: str, **extra):
             fallbacks="default",
             messages=[{
                 "role": "user",
-                "content": [
-                    {"type": "image",
-                     "source": {"type": "base64", "media_type": media_type, "data": data}},
-                    {"type": "text", "text": instruction},
-                ],
+                "content": [*blocks, {"type": "text", "text": instruction}],
             }],
             **extra,
         )
@@ -184,14 +190,19 @@ def _call_claude(image: Image.Image, system: str, instruction: str, **extra):
     except anthropic.APIStatusError as exc:
         raise OCRError(f"Anthropic API error ({exc.status_code}): {exc.message}") from exc
     except anthropic.APIConnectionError as exc:
-        raise OCRError("Could not reach the Anthropic API.") from exc
+        # Name the cause - "could not reach" alone cannot tell a timeout from a
+        # DNS failure or a proxy, and these failures are rare enough to need it.
+        cause = exc.__cause__ or exc
+        raise OCRError(
+            f"Could not reach the Anthropic API ({type(cause).__name__}: {cause})."
+        ) from exc
 
     if response.stop_reason == "refusal":
         raise OCRError("The model declined to read this image.")
     return response
 
 
-def _text_of(response) -> str:
+def text_of(response) -> str:
     return "".join(b.text for b in response.content if b.type == "text").strip()
 
 
@@ -204,7 +215,7 @@ def _claude(image: Image.Image, language: str) -> dict:
     note = f"Read by {response.model}"
     if response.stop_reason == "max_tokens":
         note += " - output was cut off at the length limit"
-    return {"text": _text_of(response), "engine": "claude", "note": note + "."}
+    return {"text": text_of(response), "engine": "claude", "note": note + "."}
 
 
 # --- deposit slips -----------------------------------------------------------
@@ -275,7 +286,7 @@ def deposit_slip(data: bytes) -> dict:
     if response.stop_reason == "max_tokens":
         raise OCRError("The slip reading was cut off before it finished.")
     try:
-        slip = json.loads(_text_of(response))
+        slip = json.loads(text_of(response))
     except ValueError as exc:
         raise OCRError("The model returned an unreadable answer. Try again.") from exc
     slip["model"] = response.model
