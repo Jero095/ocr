@@ -58,8 +58,11 @@ USER appuser
 # Where the SQLite database and uploaded files live. This is the path a
 # persistent volume must be mounted at; see docs/DEPLOYMENT.md. Without a volume
 # here, every deploy starts with an empty history and no accounts.
+#
+# No VOLUME instruction: Railway rejects Dockerfiles that declare one. The
+# volume is attached in the platform (Railway service settings) or with
+# `docker run -v` locally.
 ENV DATA_DIR=/app/data
-VOLUME ["/app/data"]
 
 # Documentation only - the platform decides the real port via $PORT.
 EXPOSE 8000

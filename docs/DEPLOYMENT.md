@@ -235,7 +235,7 @@ dependency visible.
 | `libgl1`, `libglib2.0-0` | Shared libraries Pillow and pypdfium2 need to rasterise |
 | `requirements.txt` before source | Editing code does not invalidate the pip layer |
 | non-root `appuser` | Nothing here needs root |
-| `DATA_DIR=/app/data` + `VOLUME` | The mount point, declared in the image |
+| `DATA_DIR=/app/data` | The mount point; no `VOLUME` instruction, because Railway rejects it |
 
 ### Build and prove it locally
 
@@ -291,7 +291,10 @@ and a 1 GB volume are generous. Confirm current prices at railway.com/pricing.
    Dockerfile builder and sets the healthcheck automatically.
 2. **Create a volume and mount it at `/app/data`.** Do this *before* the first
    real use. This is the single highest-consequence step — see below.
-3. **Set variables**: `DATA_DIR=/app/data`. `PORT` is injected by Railway.
+3. **Set variables**: `DATA_DIR=/app/data`, `RAILWAY_RUN_UID=0` and, for the
+   Claude vision fallback, `ANTHROPIC_API_KEY`. `PORT` is injected by Railway.
+   `RAILWAY_RUN_UID=0` is required because Railway mounts volumes as root and
+   the image runs as the non-root `appuser`, which could not write the database.
 4. **Deploy**, then watch the healthcheck pass on `/api/health`.
 5. **Create the accounts** from the Railway shell, since there is no signup:
    ```bash
